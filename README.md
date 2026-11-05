@@ -1,8 +1,10 @@
 # MKShare
 
-**Use one keyboard and mouse on two computers.** Plug your keyboard and mouse into one laptop, press a hotkey, and they control the other laptop over your network. Press it again and they come back.
+**Use one keyboard and mouse on two computers.** Plug your keyboard and mouse into one laptop, press a hotkey or click a button, and they control the other laptop over your network. Switch again and they come back.
 
-MKShare is a small, fast, open desktop app written in Rust. It runs on **Windows** and **Linux** (X11 and Wayland), and any combination works: Windows to Linux, Linux to Windows, Windows to Windows, or Linux to Linux.
+MKShare is a small, fast desktop app written in Rust. It runs on **Windows** and **Linux** (X11 and Wayland), and any combination works: Windows to Linux, Linux to Windows, Windows to Windows, or Linux to Linux.
+
+[Download the latest release](https://github.com/anurajrijal/MKSHARE/releases/latest)
 
 ---
 
@@ -39,31 +41,55 @@ MKShare is a small, fast, open desktop app written in Rust. It runs on **Windows
 
 ## How it works
 
-```
-   SERVER (has the keyboard + mouse)                CLIENT (receives them)
-  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”          â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-  â”‚ keyboard / mouse                 â”‚          â”‚                              â”‚
-  â”‚      â”‚                           â”‚          â”‚                              â”‚
-  â”‚      â–¼                           â”‚          â”‚                              â”‚
-  â”‚ capture                          â”‚  TCP     â”‚  inject                      â”‚
-  â”‚  Windows: low-level hooks        â”‚ â”€â”€â”€â”€â”€â”€â”€â–º â”‚   Windows: SendInput         â”‚
-  â”‚  Linux:   evdev (exclusive grab) â”‚ encryptedâ”‚   Linux:   uinput device     â”‚
-  â”‚      â”‚                           â”‚          â”‚                              â”‚
-  â”‚  Ctrl+Alt+K toggles local/remote â”‚          â”‚                              â”‚
-  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜          â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+### Data flow between the two computers
+
+```text
+                  SERVER                                                   CLIENT
++----------------------------------------+                 +------------------------------------+
+| keyboard + mouse                       |                 |                                    |
+|       |                                |                 |                                    |
+|       v                                |                 |                                    |
+| capture                                |                 | inject                             |
+|   Windows: low-level hooks             |                 |   Windows: SendInput               |
+|   Linux:   evdev (exclusive grab)      |                 |   Linux:   uinput virtual device   |
+|       |                                |                 |       ^                            |
+|       v                                |                 |       |                            |
+| core: local or remote?                 |                 |       |                            |
+|   local  -> deliver to this computer   |                 |       |                            |
+|   remote -> encrypt and send           |--- input ------>| decrypt and decode                 |
+|                                        |                 |                                    |
+| switch with Ctrl+Alt+K or the button   |<--- Toggle -----| switch button (asks the server)    |
++----------------------------------------+                 +------------------------------------+
 ```
 
 - In **local** mode the server behaves like a normal computer.
 - In **remote** mode the server stops delivering input to itself and sends every event to the client instead.
-- On Linux the server grabs your keyboards and mice and re-emits their events through a virtual device while in local mode. That is what makes it possible to cleanly take input away on switch.
-- The GUI starts the actual server or client as a background process, so **Stop** always releases every hook and device grab.
+- The server tells the client whether it is currently the one receiving input, and the client can ask the server to switch (`Toggle`). That is how the switch button works on both sides.
+- On Linux the server grabs your keyboards and mice and re-emits their events through a virtual device while in local mode. That is what makes it possible to cleanly take input away on a switch.
+
+### One program, two roles
+
+```text
++----------------------------------------------------------------+
+| mkshare  (one program)                                         |
+|                                                                |
+|   no arguments            mkshare server / mkshare client      |
+|   +----------------+      +-------------------------------+    |
+|   | window (GUI)   | ---> | background process            |    |
+|   | gui.rs         | <--- | core.rs  net.rs  platform/*   |    |
+|   +----------------+      +-------------------------------+    |
+|     starts and stops it      status lines come back as log     |
++----------------------------------------------------------------+
+```
+
+The window starts the real server or client as a background process, so **Stop** always releases every hook and device grab, and closing the window never leaves a server running.
 
 ## Quick start
 
 1. **Install** MKShare on both computers (see [Installation](#installation)).
 2. On the computer with the keyboard and mouse: open MKShare, choose **Server**, type a passphrase, press **Start**. Note the address it shows (for example `192.168.1.79`).
 3. On the other computer: open MKShare, choose **Client**, enter that address and the **same passphrase**, press **Start**.
-4. On the server, press **`Ctrl+Alt+K`** (or the *Send keyboard and mouse to the other computer* button). Your keyboard and mouse now control the other computer. Press `Ctrl+Alt+K` again to return.
+4. Switch: press **`Ctrl+Alt+K`** on the server's keyboard, or click the switch button in either window. Your keyboard and mouse now control the other computer. Switch again to return.
 
 Both computers must be on the same network, and the server's TCP port (default `24800`) must be reachable.
 
@@ -108,7 +134,7 @@ Use the standalone `mkshare-linux-x86_64` binary (needs glibc 2.31 or newer) and
 | **Port** | TCP port. Default `24800`. Must match on both sides. |
 | **Passphrase** | Shared secret. Must match on both sides. |
 
-The status indicator in the top-right corner shows what is happening: *Waiting for the other computer*, *Connected*, or *Keyboard & mouse are on the other computer*. A collapsible **Log** at the bottom shows details and errors.
+The status indicator in the top-right corner shows what is happening: *Waiting for the other computer*, *Connected*, or *Keyboard & mouse are on the other computer* (on the client: *Using the other computer's keyboard & mouse*). A collapsible **Log** at the bottom shows details and errors.
 
 Your settings are saved automatically in:
 
@@ -129,14 +155,14 @@ You can switch from either computer:
 
 ### Updating
 
-Click **Update application** at the bottom of the window. MKShare checks the latest release of the GitHub repository set under **Update settings** (`owner/name`) and, if a newer version exists, offers to install it. Installing stops sharing, replaces the program and restarts it.
+Click **Update application** at the bottom of the window. MKShare checks the latest release of this project on GitHub (`anurajrijal/MKSHARE`; the repository can be changed under **Update settings**) and, if a newer version exists, offers to install it. Installing stops sharing, replaces the program and restarts it.
 
 - Windows and the standalone Linux binary replace themselves.
 - A Debian/Ubuntu install is upgraded with `apt` after a graphical password prompt (`pkexec`). Reopen MKShare afterwards.
 - If the release contains `SHA256SUMS.txt` (the provided workflow adds one), the download is verified against it.
 - Requires `curl` (included with Windows 10/11 and most Linux distributions).
 
-**Publishing a release** (maintainers): set `version` in `Cargo.toml`, then push a matching tag:
+**Publishing a release** (maintainers): set `version` in `Cargo.toml`, commit and push, then push a matching tag:
 
 ```bash
 git tag v0.2.0 && git push origin v0.2.0
@@ -188,6 +214,7 @@ For a quick test you can instead start MKShare with `sudo`.
 - Choose a **long, unique passphrase**. Someone who can capture your network traffic could attempt to guess a weak passphrase offline.
 - Keystrokes you type, including passwords, travel over this connection while input is on the other computer. Use MKShare on networks you trust.
 - The passphrase is stored unencrypted in the local config file.
+- Updates are downloaded over HTTPS from GitHub and checked against `SHA256SUMS.txt`. The program itself is not code-signed.
 
 ## Troubleshooting
 
@@ -195,12 +222,13 @@ For a quick test you can instead start MKShare with `sudo`.
 |---|---|
 | Client cannot connect | Check the address, that both machines are on the same network, and that the firewall allows TCP port `24800` on the server. |
 | *wrong passphrase* in the server log | The passphrases differ. Retype them on both sides. |
-| Hotkey does nothing | The client must be connected first (status *Connected*). The hotkey is read from the server's keyboard. |
+| Switching does nothing | The client must be connected first (status *Connected*). The hotkey is read from the server's keyboard. |
 | Linux: *no readable keyboard/mouse found* | See [Linux permissions](#linux-permissions): join the `input` group and log out and in, or run with `sudo`. |
 | Linux: cannot open `/dev/uinput` | The udev rule is not active yet. Reload udev rules and log in again, or use `sudo`. |
 | Linux server: a newly plugged-in device is ignored | Press **Stop** then **Start**. Devices are detected when the server starts. |
 | Windows server: does not work over an admin window | Windows ignores input hooks for elevated windows. Run MKShare as administrator too. |
-| A key seems stuck | Press `Ctrl+Alt+K` twice. Switching releases every held key. |
+| A key seems stuck | Switch twice (`Ctrl+Alt+K` twice). Switching releases every held key. |
+| *No release has been published* when updating | The repository has no GitHub release yet. Push a version tag (see [Updating](#updating)). |
 
 ## Building from source
 
@@ -235,25 +263,44 @@ To make a binary that runs on older distributions, link against an older glibc w
 cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.31
 ```
 
+**Tests**
+
+```bash
+cargo test
+```
+
 ## Project layout
 
 ```text
 MKSHARE/
-â”œâ”€â”€ Cargo.toml
-â”œâ”€â”€ build.rs                  # embeds the icon into mkshare.exe
-â”œâ”€â”€ assets/                   # app icon (png, ico)
-â”œâ”€â”€ packaging/                # Debian: udev rule, .desktop launcher
-â””â”€â”€ src/
-    â”œâ”€â”€ main.rs               # entry point: GUI, or server/client subcommands
-    â”œâ”€â”€ gui.rs                # desktop window (egui)
-    â”œâ”€â”€ core.rs               # hotkey handling and local/remote routing
-    â”œâ”€â”€ net.rs                # encrypted, authenticated framing over TCP
-    â”œâ”€â”€ proto.rs              # wire messages and key code conventions
-    â”œâ”€â”€ update.rs             # self-update from GitHub Releases
-    â””â”€â”€ platform/
-        â”œâ”€â”€ windows.rs        # low-level hooks + SendInput
-        â””â”€â”€ linux.rs          # evdev grab + uinput
+|-- Cargo.toml                 package manifest and .deb metadata (version lives here)
+|-- Cargo.lock
+|-- build.rs                   embeds the app icon into mkshare.exe
+|-- README.md
+|-- .gitignore
+|-- .github/
+|   `-- workflows/
+|       `-- release.yml        builds and publishes a release when a v* tag is pushed
+|-- assets/
+|   |-- icon.png               window and Linux app icon
+|   `-- icon.ico               Windows executable icon
+|-- packaging/
+|   |-- 99-mkshare.rules       udev rule (access to /dev/uinput for the input group)
+|   `-- mkshare.desktop        Linux application-menu entry
+`-- src/
+    |-- main.rs                entry point: no arguments = GUI; "server" / "client" = headless
+    |-- gui.rs                 desktop window (egui): settings, status, buttons, log
+    |-- core.rs                hotkey handling and local/remote routing on the server
+    |-- net.rs                 encrypted, authenticated message framing over TCP
+    |-- proto.rs               wire messages and key-code conventions
+    |-- update.rs              "Update application": check, download, install from GitHub Releases
+    `-- platform/
+        |-- mod.rs             picks the backend for the current OS
+        |-- windows.rs         low-level hooks (capture) and SendInput (inject)
+        `-- linux.rs           evdev exclusive grab (capture) and uinput (inject)
 ```
+
+Local build output goes to `target/` and `dist/`; both are git-ignored.
 
 ## Limitations
 
