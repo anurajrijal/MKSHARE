@@ -78,6 +78,23 @@ impl Secure {
         Ok(s)
     }
 
+    /// A second handle for the same connection, so one thread can send while
+    /// another receives (each direction keeps its own counter).
+    pub fn try_clone(&self) -> Result<Self> {
+        Ok(Secure {
+            stream: self.stream.try_clone()?,
+            cipher: self.cipher.clone(),
+            send_dir: self.send_dir,
+            recv_dir: self.recv_dir,
+            send_ctr: self.send_ctr,
+            recv_ctr: self.recv_ctr,
+        })
+    }
+
+    pub fn shutdown(&self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+
     pub fn set_read_timeout(&self, d: Option<Duration>) -> Result<()> {
         self.stream.set_read_timeout(d)?;
         Ok(())

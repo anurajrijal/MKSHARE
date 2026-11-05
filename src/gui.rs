@@ -27,12 +27,31 @@ struct Config {
     host: String,
     port: String,
     pass: String,
+    /// GitHub "owner/name" that publishes MKShare releases
+    update_repo: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { mode: Mode::Server, host: String::new(), port: "24800".into(), pass: String::new() }
+        Config {
+            mode: Mode::Server,
+            host: String::new(),
+            port: "24800".into(),
+            pass: String::new(),
+            update_repo: String::new(),
+        }
     }
+}
+
+#[derive(Clone)]
+enum Up {
+    Idle,
+    Checking,
+    UpToDate,
+    Available(crate::update::Release),
+    Installing,
+    Done(String),
+    Error(String),
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -82,7 +101,8 @@ impl Status {
             (Status::Waiting, _) => ("Waiting for the other computer", Color32::from_rgb(217, 119, 6)),
             (Status::Connected, Mode::Client) => ("Connected", Color32::from_rgb(22, 163, 74)),
             (Status::Connected, Mode::Server) => ("Other computer connected", Color32::from_rgb(22, 163, 74)),
-            (Status::Remote, _) => ("Keyboard & mouse are on the other computer", Color32::from_rgb(37, 99, 235)),
+            (Status::Remote, Mode::Server) => ("Keyboard & mouse are on the other computer", Color32::from_rgb(37, 99, 235)),
+            (Status::Remote, Mode::Client) => ("Using the other computer's keyboard & mouse", Color32::from_rgb(37, 99, 235)),
         }
     }
 }
@@ -99,8 +119,10 @@ fn parse_status(line: &str) -> Option<Status> {
         Some(Status::Connected)
     } else if line.starts_with("Client disconnected") {
         Some(Status::Waiting)
-    } else if line.starts_with("Input -> REMOTE") {
+    } else if line.starts_with("Input -> REMOTE") || line.starts_with("Active: on") {
         Some(Status::Remote)
+    } else if line.starts_with("Active: off") {
+        Some(Status::Connected)
     } else if line.starts_with("Connected to") {
         Some(Status::Connected)
     } else if line.starts_with("Connecting to") || line.starts_with("Disconnected") {
@@ -142,13 +164,16 @@ struct App {
     shared: Arc<Mutex<Shared>>,
     my_ip: Option<String>,
     running_mode: Mode,
+    update: Arc<Mutex<Up>>,
 }
 
 impl App {
     fn new() -> Self {
         let cfg = load_config();
         let running_mode = cfg.mode;
+        crate::update::cleanup_old();
         App {
+            update: Arc::new(Mutex::new(Up::Idle)),
             cfg,
             show_pass: false,
             error: None,
@@ -249,6 +274,36 @@ impl App {
                 );
             }
         }
+    }
+
+    fn check_update(&mut self, ctx: &egui::Context) {
+        save_config(&self.cfg);
+        *self.update.lock().unwrap() = Up::Checking;
+        let (state, repo, ctx) = (self.update.clone(), self.cfg.update_repo.clone(), ctx.clone());
+        thread::spawn(move || {
+            let next = match crate::update::check(&repo) {
+                Ok(None) => Up::UpToDate,
+                Ok(Some(rel)) => Up::Available(rel),
+                Err(e) => Up::Error(format!("{e:#}")),
+            };
+            *state.lock().unwrap() = next;
+            ctx.request_repaint();
+        });
+    }
+
+    fn install_update(&mut self, rel: crate::update::Release, ctx: &egui::Context) {
+        self.stop(); // the running program file is about to be replaced
+        save_config(&self.cfg);
+        *self.update.lock().unwrap() = Up::Installing;
+        let (state, ctx) = (self.update.clone(), ctx.clone());
+        thread::spawn(move || {
+            match crate::update::install(&rel) {
+                Ok(crate::update::Outcome::Restarted) => std::process::exit(0),
+                Ok(crate::update::Outcome::Installed(msg)) => *state.lock().unwrap() = Up::Done(msg),
+                Err(e) => *state.lock().unwrap() = Up::Error(format!("{e:#}")),
+            }
+            ctx.request_repaint();
+        });
     }
 
     fn send_toggle(&mut self) {
@@ -358,6 +413,26 @@ impl eframe::App for App {
                 }
             }
 
+            if running && self.running_mode == Mode::Client {
+                ui.add_space(8.0);
+                match status {
+                    Status::Connected | Status::Remote => {
+                        let text = if status == Status::Remote {
+                            "Send keyboard and mouse back to the other computer"
+                        } else {
+                            "Use the other computer's keyboard and mouse"
+                        };
+                        if ui.add_sized([ui.available_width(), 32.0], egui::Button::new(text)).clicked() {
+                            self.send_toggle();
+                        }
+                        ui.label(RichText::new("You can also press Ctrl+Alt+K on the server's keyboard.").weak());
+                    }
+                    _ => {
+                        ui.label(RichText::new("Waiting to connect to the server...").weak());
+                    }
+                }
+            }
+
             if running && self.running_mode == Mode::Server {
                 ui.add_space(8.0);
                 match status {
@@ -380,6 +455,57 @@ impl eframe::App for App {
             }
 
             ui.add_space(10.0);
+            ui.separator();
+            let up = self.update.lock().unwrap().clone();
+            let busy = matches!(up, Up::Checking | Up::Installing);
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!busy, egui::Button::new("Update application")).clicked() {
+                    self.check_update(ctx);
+                }
+                match &up {
+                    Up::Idle => {
+                        ui.label(RichText::new(format!("Version {}", crate::update::CURRENT)).weak());
+                    }
+                    Up::Checking => {
+                        ui.spinner();
+                        ui.label("Checking for updates...");
+                    }
+                    Up::UpToDate => {
+                        ui.label(RichText::new(format!("Up to date (version {})", crate::update::CURRENT)).color(Color32::from_rgb(22, 163, 74)));
+                    }
+                    Up::Available(rel) => {
+                        if ui.button(format!("Install version {}", rel.version)).clicked() {
+                            self.install_update(rel.clone(), ctx);
+                        }
+                    }
+                    Up::Installing => {
+                        ui.spinner();
+                        ui.label("Downloading and installing...");
+                    }
+                    Up::Done(msg) => {
+                        ui.label(RichText::new(msg).color(Color32::from_rgb(22, 163, 74)));
+                    }
+                    Up::Error(_) => {}
+                }
+            });
+            if let Up::Available(rel) = &up {
+                ui.label(RichText::new(format!("A newer version ({}) is available. Installing stops sharing and restarts the app.", rel.version)).weak());
+            }
+            if let Up::Error(e) = &up {
+                ui.colored_label(Color32::from_rgb(220, 38, 38), e);
+            }
+            egui::CollapsingHeader::new("Update settings").default_open(false).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("GitHub repository");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.cfg.update_repo)
+                            .hint_text("owner/name, e.g. yourname/mkshare")
+                            .desired_width(240.0),
+                    );
+                });
+                ui.label(RichText::new("Updates are downloaded from the latest release of this repository.").weak());
+            });
+
             egui::CollapsingHeader::new("Log").default_open(false).show(ui, |ui| {
                 egui::ScrollArea::vertical().max_height(150.0).stick_to_bottom(true).show(ui, |ui| {
                     ui.set_min_width(ui.available_width());

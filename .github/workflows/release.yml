@@ -1,0 +1,62 @@
+name: Release
+
+# Publish a release by pushing a tag that matches the version in Cargo.toml, e.g.
+#   git tag v0.2.0 && git push origin v0.2.0
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: target/release/mkshare.exe
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Tools
+        run: |
+          pip install ziglang
+          cargo install cargo-zigbuild cargo-deb
+      - name: Build (links against glibc 2.31 so it runs on older distros)
+        run: cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.31
+      - name: Debian package
+        run: cargo deb --no-build --target x86_64-unknown-linux-gnu
+      - run: |
+          mkdir out
+          cp target/x86_64-unknown-linux-gnu/release/mkshare out/mkshare-linux-x86_64
+          cp target/debian/*_amd64.deb out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: out/*
+
+  publish:
+    needs: [windows, linux]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

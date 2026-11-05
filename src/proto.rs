@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 pub enum Msg {
     Hello,
     Ping,
+    /// client -> server: please switch input to / back from the client
+    Toggle,
+    /// server -> client: true while the client is the one receiving input
+    Active(bool),
     Move { dx: i32, dy: i32 },
     /// btn: 0 left, 1 right, 2 middle, 3 back, 4 forward
     Button { btn: u8, down: bool },

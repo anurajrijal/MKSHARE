@@ -33,6 +33,7 @@ impl Core {
 
     pub fn attach(&self, tx: Sender<Msg>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let _ = tx.send(Msg::Active(self.is_remote()));
         *self.tx.lock().unwrap() = Some((id, tx));
         id
     }
@@ -58,6 +59,7 @@ impl Core {
         if !on {
             self.send(Msg::ReleaseAll);
         }
+        self.send(Msg::Active(on));
         println!("Input -> {}", if on { "REMOTE" } else { "LOCAL" });
     }
 

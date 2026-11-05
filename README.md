@@ -27,7 +27,8 @@ MKShare is a small, fast, open desktop app written in Rust. It runs on **Windows
 ## Features
 
 - **Graphical app**: pick Server or Client, enter a passphrase, press Start.
-- **Hotkey switching**: `Ctrl+Alt+K` sends the keyboard and mouse to the other computer and back.
+- **Switch from either computer**: a button on the server, a button on the client, or the `Ctrl+Alt+K` hotkey.
+- **Built-in updates**: an **Update application** button installs new releases from GitHub.
 - **Cross-platform**: Windows 10/11 and Linux (Debian/Ubuntu `.deb` provided).
 - **Wayland-ready on Linux**: input is captured and injected at the kernel level (evdev/uinput), so it does not depend on X11.
 - **Encrypted**: all traffic is authenticated and encrypted with a passphrase you choose.
@@ -106,11 +107,32 @@ Your settings are saved automatically in:
 
 > The passphrase is stored in that file in plain text.
 
-### Hotkey
+### Switching
 
-| Keys | Action |
+You can switch from either computer:
+
+| Where | How |
 |---|---|
-| `Ctrl` + `Alt` + `K` (on the server's keyboard) | Switch input between the two computers |
+| Server | The **Send keyboard and mouse to the other computer** button |
+| Client | The **Use the other computer's keyboard and mouse** button (it becomes **Send keyboard and mouse back to the other computer** while you are using them) |
+| Server's keyboard | `Ctrl` + `Alt` + `K`, from the keyboard that is plugged into the server |
+
+### Updating
+
+Click **Update application** at the bottom of the window. MKShare checks the latest release of the GitHub repository set under **Update settings** (`owner/name`) and, if a newer version exists, offers to install it. Installing stops sharing, replaces the program and restarts it.
+
+- Windows and the standalone Linux binary replace themselves.
+- A Debian/Ubuntu install is upgraded with `apt` after a graphical password prompt (`pkexec`). Reopen MKShare afterwards.
+- If the release contains `SHA256SUMS.txt` (the provided workflow adds one), the download is verified against it.
+- Requires `curl` (included with Windows 10/11 and most Linux distributions).
+
+**Publishing a release** (maintainers): set `version` in `Cargo.toml`, then push a matching tag:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+`.github/workflows/release.yml` builds the Windows `.exe`, the Linux binary and the `.deb`, and attaches them to the release together with `SHA256SUMS.txt`.
 
 ## Command line
 
@@ -217,6 +239,7 @@ MKSHARE/
     ├── core.rs               # hotkey handling and local/remote routing
     ├── net.rs                # encrypted, authenticated framing over TCP
     ├── proto.rs              # wire messages and key code conventions
+    ├── update.rs             # self-update from GitHub Releases
     └── platform/
         ├── windows.rs        # low-level hooks + SendInput
         └── linux.rs          # evdev grab + uinput

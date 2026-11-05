@@ -5,6 +5,7 @@ mod gui;
 mod net;
 mod platform;
 mod proto;
+mod update;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -12,7 +13,7 @@ use proto::Msg;
 use std::{
     io::BufRead,
     net::{TcpListener, TcpStream},
-    sync::{mpsc, Arc},
+    sync::{mpsc, Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -106,13 +107,23 @@ fn attach_console() {
     }
 }
 
+/// Sender for requests from this client to the server (set while connected).
+static CLIENT_TX: Mutex<Option<mpsc::Sender<Msg>>> = Mutex::new(None);
+
 fn watch_stdin(core: Option<Arc<core::Core>>) {
     thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
             let Ok(line) = line else { break };
             if line.trim() == "toggle" {
-                if let Some(c) = &core {
-                    c.set_remote(!c.is_remote());
+                match &core {
+                    // server: switch directly
+                    Some(c) => c.set_remote(!c.is_remote()),
+                    // client: ask the server to switch
+                    None => {
+                        if let Some(tx) = CLIENT_TX.lock().unwrap().as_ref() {
+                            let _ = tx.send(Msg::Toggle);
+                        }
+                    }
                 }
             }
         }
@@ -136,7 +147,7 @@ fn run_server(port: u16, pass: String, stdin_control: bool) -> Result<()> {
                 let (core, pass) = (core.clone(), pass.clone());
                 thread::spawn(move || {
                     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-                    if let Err(e) = serve(&core, stream, &pass, &peer) {
+                    if let Err(e) = serve(core, stream, &pass, &peer) {
                         eprintln!("Connection from {peer} ended: {e:#}");
                     }
                 });
@@ -146,12 +157,23 @@ fn run_server(port: u16, pass: String, stdin_control: bool) -> Result<()> {
     platform::capture(core) // blocks forever
 }
 
-fn serve(core: &core::Core, stream: TcpStream, pass: &str, peer: &str) -> Result<()> {
+fn serve(core: Arc<core::Core>, stream: TcpStream, pass: &str, peer: &str) -> Result<()> {
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut ch = net::Secure::accept(stream, pass)?;
     ch.set_read_timeout(None)?;
+
+    // Requests coming from the client (e.g. "switch input") are handled on their own thread.
+    let mut reader = ch.try_clone()?;
+    let reader_core = core.clone();
+    thread::spawn(move || {
+        while let Ok(msg) = reader.recv() {
+            if let Msg::Toggle = msg {
+                reader_core.set_remote(!reader_core.is_remote());
+            }
+        }
+    });
 
     let (tx, rx) = mpsc::channel::<Msg>();
     let id = core.attach(tx);
@@ -167,6 +189,7 @@ fn serve(core: &core::Core, stream: TcpStream, pass: &str, peer: &str) -> Result
         }
     };
     core.detach(id);
+    ch.shutdown(); // also ends the reader thread
     println!("Client disconnected: {peer}");
     result
 }
@@ -193,10 +216,27 @@ fn client_session(host: &str, port: u16, pass: &str, inj: &mut platform::Injecto
     let mut ch = net::Secure::connect(stream, pass)?;
     ch.set_read_timeout(Some(Duration::from_secs(10)))?; // server pings every 2s
     println!("Connected to {host}:{port}");
-    loop {
+
+    // Requests to the server (e.g. "switch input") are sent from their own thread.
+    let mut writer = ch.try_clone()?;
+    let (tx, rx) = mpsc::channel::<Msg>();
+    *CLIENT_TX.lock().unwrap() = Some(tx);
+    thread::spawn(move || {
+        while let Ok(m) = rx.recv() {
+            if writer.send(&m).is_err() {
+                break;
+            }
+        }
+    });
+
+    let result = (|| loop {
         match ch.recv()? {
-            Msg::Ping | Msg::Hello => {}
+            Msg::Ping | Msg::Hello | Msg::Toggle => {}
+            Msg::Active(on) => println!("Active: {}", if on { "on" } else { "off" }),
             m => inj.apply(&m),
         }
-    }
+    })();
+    *CLIENT_TX.lock().unwrap() = None;
+    ch.shutdown();
+    result
 }

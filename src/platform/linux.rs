@@ -282,7 +282,7 @@ impl Injector {
                 self.emit(&[InputEvent::new(EventType::KEY, code, value)]);
             }
             Msg::ReleaseAll => self.release_all(),
-            Msg::Hello | Msg::Ping => {}
+            Msg::Hello | Msg::Ping | Msg::Toggle | Msg::Active(_) => {}
         }
     }
 
