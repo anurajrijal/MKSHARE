@@ -1,0 +1,54 @@
+[package]
+name = "mkshare"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Share one keyboard and mouse between Windows and Linux machines over the network"
+
+[dependencies]
+anyhow = "1"
+bincode = "1"
+chacha20poly1305 = "0.10"
+clap = { version = "4", features = ["derive", "env"] }
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+serde_json = "1"
+getrandom = "0.2"
+pbkdf2 = "0.12"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.12"
+
+[build-dependencies]
+winresource = "0.1"
+
+[package.metadata.deb]
+maintainer = "mkshare <noreply@example.com>"
+section = "utils"
+priority = "optional"
+depends = "$auto, libgl1, libegl1, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libxcursor1, libxi6, libxrandr2, libwayland-client0"
+extended-description = "Share one keyboard and mouse between Windows and Linux machines over an encrypted network connection. Includes a graphical app (MKShare) and a command line mode."
+assets = [
+    ["target/release/mkshare", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/mkshare/README", "644"],
+    ["packaging/99-mkshare.rules", "lib/udev/rules.d/99-mkshare.rules", "644"],
+    ["packaging/mkshare.desktop", "usr/share/applications/mkshare.desktop", "644"],
+    ["assets/icon.png", "usr/share/icons/hicolor/256x256/apps/mkshare.png", "644"],
+]
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

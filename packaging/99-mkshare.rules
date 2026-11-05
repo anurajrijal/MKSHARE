@@ -1,0 +1,2 @@
+# Let members of the "input" group create virtual input devices (needed by mkshare)
+KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
