@@ -107,8 +107,13 @@ pub fn check(repo: &str) -> Result<Option<Release>> {
     if !valid_repo(repo) {
         bail!("Enter the GitHub repository as owner/name (for example yourname/mkshare).");
     }
-    let body = fetch(&format!("https://api.github.com/repos/{repo}/releases/latest"))
-        .context("could not reach GitHub (check the repository name and your internet connection)")?;
+    let body = fetch(&format!("https://api.github.com/repos/{repo}/releases/latest")).map_err(|e| {
+        if e.to_string().contains("404") {
+            anyhow!("No release has been published for {repo} yet.")
+        } else {
+            e.context("could not reach GitHub (check your internet connection)")
+        }
+    })?;
     let rel: GhRelease = serde_json::from_slice(&body).context("unexpected reply from GitHub")?;
     if !is_newer(&rel.tag_name, CURRENT) {
         return Ok(None);

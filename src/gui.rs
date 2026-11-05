@@ -38,7 +38,7 @@ impl Default for Config {
             host: String::new(),
             port: "24800".into(),
             pass: String::new(),
-            update_repo: String::new(),
+            update_repo: DEFAULT_UPDATE_REPO.into(),
         }
     }
 }
@@ -65,11 +65,18 @@ fn config_path() -> Option<PathBuf> {
     Some(base.join("mkshare").join("config.json"))
 }
 
+/// Where "Update application" looks for new versions unless changed in the settings.
+const DEFAULT_UPDATE_REPO: &str = "anurajrijal/MKSHARE";
+
 fn load_config() -> Config {
-    config_path()
+    let mut cfg: Config = config_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if cfg.update_repo.trim().is_empty() {
+        cfg.update_repo = DEFAULT_UPDATE_REPO.into();
+    }
+    cfg
 }
 
 fn save_config(cfg: &Config) {

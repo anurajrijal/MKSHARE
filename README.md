@@ -41,16 +41,16 @@ MKShare is a small, fast, open desktop app written in Rust. It runs on **Windows
 
 ```
    SERVER (has the keyboard + mouse)                CLIENT (receives them)
-  ┌──────────────────────────────────┐          ┌──────────────────────────────┐
-  │ keyboard / mouse                 │          │                              │
-  │      │                           │          │                              │
-  │      ▼                           │          │                              │
-  │ capture                          │  TCP     │  inject                      │
-  │  Windows: low-level hooks        │ ───────► │   Windows: SendInput         │
-  │  Linux:   evdev (exclusive grab) │ encrypted│   Linux:   uinput device     │
-  │      │                           │          │                              │
-  │  Ctrl+Alt+K toggles local/remote │          │                              │
-  └──────────────────────────────────┘          └──────────────────────────────┘
+  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”          â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+  â”‚ keyboard / mouse                 â”‚          â”‚                              â”‚
+  â”‚      â”‚                           â”‚          â”‚                              â”‚
+  â”‚      â–¼                           â”‚          â”‚                              â”‚
+  â”‚ capture                          â”‚  TCP     â”‚  inject                      â”‚
+  â”‚  Windows: low-level hooks        â”‚ â”€â”€â”€â”€â”€â”€â”€â–º â”‚   Windows: SendInput         â”‚
+  â”‚  Linux:   evdev (exclusive grab) â”‚ encryptedâ”‚   Linux:   uinput device     â”‚
+  â”‚      â”‚                           â”‚          â”‚                              â”‚
+  â”‚  Ctrl+Alt+K toggles local/remote â”‚          â”‚                              â”‚
+  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜          â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
 - In **local** mode the server behaves like a normal computer.
@@ -69,6 +69,16 @@ Both computers must be on the same network, and the server's TCP port (default `
 
 ## Installation
 
+Download the file for your system from the **[latest release](https://github.com/anurajrijal/MKSHARE/releases/latest)**:
+
+| System | File |
+|---|---|
+| Windows | `mkshare.exe` |
+| Debian / Ubuntu (64-bit) | `mkshare_<version>-1_amd64.deb` |
+| Other Linux (64-bit) | `mkshare-linux-x86_64` |
+
+After the first install, use **Update application** inside the app to get new versions.
+
 ### Windows
 
 Run `mkshare.exe`. It is a standalone program and needs no installer.
@@ -79,7 +89,7 @@ Run `mkshare.exe`. It is a standalone program and needs no installer.
 ### Debian / Ubuntu (22.04 or newer, 64-bit Intel/AMD)
 
 ```bash
-sudo apt install ./mkshare_0.1.0-1_amd64.deb
+sudo apt install ./mkshare_0.2.0-1_amd64.deb
 sudo usermod -aG input $USER      # then log out and back in
 ```
 
@@ -229,20 +239,20 @@ cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.31
 
 ```text
 MKSHARE/
-├── Cargo.toml
-├── build.rs                  # embeds the icon into mkshare.exe
-├── assets/                   # app icon (png, ico)
-├── packaging/                # Debian: udev rule, .desktop launcher
-└── src/
-    ├── main.rs               # entry point: GUI, or server/client subcommands
-    ├── gui.rs                # desktop window (egui)
-    ├── core.rs               # hotkey handling and local/remote routing
-    ├── net.rs                # encrypted, authenticated framing over TCP
-    ├── proto.rs              # wire messages and key code conventions
-    ├── update.rs             # self-update from GitHub Releases
-    └── platform/
-        ├── windows.rs        # low-level hooks + SendInput
-        └── linux.rs          # evdev grab + uinput
+â”œâ”€â”€ Cargo.toml
+â”œâ”€â”€ build.rs                  # embeds the icon into mkshare.exe
+â”œâ”€â”€ assets/                   # app icon (png, ico)
+â”œâ”€â”€ packaging/                # Debian: udev rule, .desktop launcher
+â””â”€â”€ src/
+    â”œâ”€â”€ main.rs               # entry point: GUI, or server/client subcommands
+    â”œâ”€â”€ gui.rs                # desktop window (egui)
+    â”œâ”€â”€ core.rs               # hotkey handling and local/remote routing
+    â”œâ”€â”€ net.rs                # encrypted, authenticated framing over TCP
+    â”œâ”€â”€ proto.rs              # wire messages and key code conventions
+    â”œâ”€â”€ update.rs             # self-update from GitHub Releases
+    â””â”€â”€ platform/
+        â”œâ”€â”€ windows.rs        # low-level hooks + SendInput
+        â””â”€â”€ linux.rs          # evdev grab + uinput
 ```
 
 ## Limitations
