@@ -124,7 +124,7 @@ Run `mkshare.exe`. It is a standalone program and needs no installer.
 ### Debian / Ubuntu (22.04 or newer, 64-bit Intel/AMD)
 
 ```bash
-sudo apt install ./mkshare_0.3.2-1_amd64.deb
+sudo apt install ./mkshare_0.3.3-1_amd64.deb
 ```
 
 This installs the program, an **MKShare** entry in your application menu, and a udev rule that gives the person logged in at the computer access to the input devices (no group changes, no logging out). Start it from the menu or by running `mkshare`. See [Linux permissions](#linux-permissions).
@@ -204,7 +204,7 @@ Click **Update application** at the bottom of the window. MKShare checks the lat
 **Publishing a release** (maintainers): set `version` in `Cargo.toml`, commit and push, then push a matching tag:
 
 ```bash
-git tag v0.3.2 && git push origin v0.3.2
+git tag v0.3.3 && git push origin v0.3.3
 ```
 
 `.github/workflows/release.yml` builds the Windows `.exe`, the Linux binary and the `.deb`, and attaches them to the release together with `SHA256SUMS.txt`.

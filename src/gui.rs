@@ -879,12 +879,22 @@ impl App {
                     info_box(ui, |ui| {
                         ui.label(RichText::new("Servers found - click one to use it:").strong());
                         for f in &scan.results {
-                            if ui.button(format!("{}   ({})", f.name, f.addr)).clicked() {
+                            let chosen = self.cfg.host == f.addr && self.cfg.port == f.port.to_string();
+                            let button = egui::Button::new(format!("{}   ({})", f.name, f.addr)).selected(chosen);
+                            if ui.add(button).clicked() {
                                 self.cfg.host = f.addr.clone();
                                 self.cfg.port = f.port.to_string();
                                 self.cfg.server_name = f.name.clone();
                                 self.cfg.named_host = f.addr.clone();
                             }
+                        }
+                        if let Some(f) = scan.results.iter().find(|f| self.cfg.host == f.addr && self.cfg.port == f.port.to_string()) {
+                            let msg = if self.cfg.pass.is_empty() {
+                                format!("Using {} ({}). Now enter the passphrase and press Start.", f.name, f.addr)
+                            } else {
+                                format!("Using {} ({}). Press Start.", f.name, f.addr)
+                            };
+                            ui.colored_label(GREEN, msg);
                         }
                     });
                 } else {
@@ -1163,6 +1173,13 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.ui(ctx);
+    }
+}
+
+impl App {
+    /// One frame of the whole window (separate from `update` so tests can drive it).
+    fn ui(&mut self, ctx: &egui::Context) {
         if self.hide_first_frame {
             self.hide_first_frame = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -1237,4 +1254,95 @@ pub fn run(background: bool) -> anyhow::Result<()> {
         }),
     )
         .map_err(|e| anyhow::anyhow!("cannot open window: {e}"))
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+
+    /// Drives the real UI with synthetic mouse events (no window needed).
+    struct Harness {
+        ctx: egui::Context,
+        app: App,
+        time: f64,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("mkshare-ui-test-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::env::set_var("XDG_CONFIG_HOME", &dir);
+            std::env::set_var("APPDATA", &dir);
+            let ctx = egui::Context::default();
+            theme(&ctx);
+            let mut app = App::new(&ctx, false, false);
+            app.cfg = Config::default();
+            app.cfg.mode = Mode::Client;
+            app.scanned_once = true;
+            Harness { ctx, app, time: 0.0 }
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) {
+            self.time += 0.05;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(920.0, 800.0))),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let app = &mut self.app;
+            let _ = self.ctx.run(input, |ctx| app.ui(ctx));
+        }
+
+        fn click(&mut self, x: f32, y: f32) {
+            let pos = egui::pos2(x, y);
+            let btn = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            self.frame(vec![egui::Event::PointerMoved(pos)]);
+            self.frame(vec![btn(true)]);
+            self.frame(vec![btn(false)]);
+            self.frame(vec![]);
+        }
+    }
+
+    fn found() -> crate::discovery::Found {
+        serde_json::from_str(r#"{"name":"PC-ONE","port":24811,"version":"x"}"#).map(|mut f: crate::discovery::Found| {
+            f.addr = "192.168.1.78".into();
+            f
+        })
+        .unwrap()
+    }
+
+    /// Clicking a server in the "Servers found" list must fill in its address and port.
+    #[test]
+    fn clicking_a_found_server_uses_it() {
+        let mut h = Harness::new();
+        *h.app.scan.lock().unwrap() = ScanState { running: false, done: true, results: vec![found()] };
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let mut hit = None;
+        // sweep the window top to bottom: the button must be hit somewhere
+        'outer: for y in (100..800).step_by(3) {
+            for x in [400.0_f32, 500.0, 600.0] {
+                h.app.cfg.host.clear();
+                h.click(x, y as f32);
+                if h.app.cfg.host == "192.168.1.78" {
+                    hit = Some((x, y));
+                    break 'outer;
+                }
+            }
+        }
+        let (x, y) = hit.expect("no click position selected the found server");
+        println!("found server selected by a click at ({x}, {y})");
+        assert_eq!(h.app.cfg.port, "24811");
+        assert_eq!(h.app.cfg.server_name, "PC-ONE");
+        assert_eq!(h.app.cfg.named_host, "192.168.1.78");
+        // the chosen entry stays chosen after more frames, and the address field keeps the value
+        h.frame(vec![]);
+        assert_eq!(h.app.cfg.host, "192.168.1.78");
+    }
 }

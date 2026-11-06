@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::{
-    net::{SocketAddr, UdpSocket},
+    net::{Ipv4Addr, SocketAddr, UdpSocket},
     thread,
     time::{Duration, Instant},
 };
@@ -61,23 +61,63 @@ pub fn spawn_responder(udp_port: u16, tcp_port: u16) {
     });
 }
 
+/// This computer's address on the network it uses to reach the outside (no packet is sent).
+fn local_v4() -> Option<Ipv4Addr> {
+    let s = UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("8.8.8.8:80").ok()?;
+    match s.local_addr().ok()? {
+        SocketAddr::V4(a) => Some(*a.ip()),
+        _ => None,
+    }
+}
+
 /// Addresses to ask: the global broadcast plus this network's /24 broadcast.
 fn lan_targets() -> Vec<SocketAddr> {
     let mut t: Vec<SocketAddr> = vec![([255, 255, 255, 255], UDP_PORT).into()];
-    if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
-        if s.connect("8.8.8.8:80").is_ok() {
-            if let Ok(SocketAddr::V4(a)) = s.local_addr() {
-                let o = a.ip().octets();
-                t.push(([o[0], o[1], o[2], 255], UDP_PORT).into());
-            }
-        }
+    if let Some(ip) = local_v4() {
+        let o = ip.octets();
+        t.push(([o[0], o[1], o[2], 255], UDP_PORT).into());
     }
     t
 }
 
+/// How likely an address of the server is reachable from this computer (lower is better).
+fn reach_score(addr: &str, local: Option<Ipv4Addr>) -> u8 {
+    let Ok(ip) = addr.parse::<Ipv4Addr>() else { return 5 };
+    let o = ip.octets();
+    if let Some(l) = local {
+        if l.octets()[..3] == o[..3] {
+            return 0; // same network as this computer
+        }
+    }
+    match o {
+        [192, 168, ..] | [10, ..] => 1,
+        [169, 254, ..] => 4, // link-local
+        [172, b, ..] if (16..=31).contains(&b) => 3, // often a virtual adapter (WSL, Hyper-V, Docker)
+        _ => 2,
+    }
+}
+
+/// A server with several network adapters answers once per adapter. Keep one entry per
+/// server (name + port) with the address this computer is most likely able to reach.
+fn one_per_server(found: Vec<Found>, local: Option<Ipv4Addr>) -> Vec<Found> {
+    let mut out: Vec<Found> = Vec::new();
+    for f in found {
+        match out.iter_mut().find(|o| o.name == f.name && o.port == f.port) {
+            Some(o) => {
+                if reach_score(&f.addr, local) < reach_score(&o.addr, local) {
+                    *o = f;
+                }
+            }
+            None => out.push(f),
+        }
+    }
+    out
+}
+
 /// Client side: look for servers on the local network.
 pub fn scan(timeout: Duration) -> Vec<Found> {
-    scan_targets(&lan_targets(), timeout)
+    one_per_server(scan_targets(&lan_targets(), timeout), local_v4())
 }
 
 pub fn scan_targets(targets: &[SocketAddr], timeout: Duration) -> Vec<Found> {
@@ -127,5 +167,29 @@ mod tests {
     fn scan_with_no_server_is_empty() {
         let found = scan_targets(&[([127, 0, 0, 1], 34899).into()], Duration::from_millis(300));
         assert!(found.is_empty());
+    }
+
+    fn entry(name: &str, port: u16, addr: &str) -> Found {
+        Found { name: name.into(), port, version: "x".into(), addr: addr.into() }
+    }
+
+    #[test]
+    fn one_entry_per_server_with_the_reachable_address() {
+        let found = vec![entry("PC", 24800, "172.19.48.1"), entry("PC", 24800, "192.168.1.78"), entry("OTHER", 24800, "192.168.1.9")];
+        // this computer is on 192.168.1.x: the 192.168.1.78 address wins over the virtual-adapter one
+        let local = Some(Ipv4Addr::new(192, 168, 1, 50));
+        let r = one_per_server(found.clone(), local);
+        assert_eq!(r.len(), 2);
+        assert_eq!((r[0].name.as_str(), r[0].addr.as_str()), ("PC", "192.168.1.78"));
+        assert_eq!(r[1].addr, "192.168.1.9");
+        // different network, or unknown: still prefers a home/office address over 172.16-31.x
+        let r = one_per_server(found, Some(Ipv4Addr::new(10, 0, 0, 5)));
+        assert_eq!(r[0].addr, "192.168.1.78");
+    }
+
+    #[test]
+    fn same_name_on_different_ports_is_kept_apart() {
+        let r = one_per_server(vec![entry("PC", 24800, "192.168.1.78"), entry("PC", 24811, "192.168.1.78")], None);
+        assert_eq!(r.len(), 2);
     }
 }
