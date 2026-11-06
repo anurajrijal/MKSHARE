@@ -1,12 +1,13 @@
 [package]
 name = "mkshare"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 description = "Share one keyboard and mouse between Windows and Linux machines over the network"
 
 [dependencies]
 anyhow = "1"
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 bincode = "1"
 chacha20poly1305 = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
@@ -21,6 +22,7 @@ sha2 = "0.10"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_LibraryLoader",
@@ -39,6 +41,7 @@ maintainer = "mkshare <noreply@example.com>"
 section = "utils"
 priority = "optional"
 depends = "$auto, libgl1, libegl1, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libxcursor1, libxi6, libxrandr2, libwayland-client0"
+recommends = "libsecret-tools"
 extended-description = "Share one keyboard and mouse between Windows and Linux machines over an encrypted network connection. Includes a graphical app (MKShare) and a command line mode."
 assets = [
     ["target/release/mkshare", "usr/bin/", "755"],

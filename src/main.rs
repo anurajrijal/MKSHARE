@@ -1,15 +1,19 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod clipboard;
 mod core;
+mod discovery;
+mod edge;
 mod gui;
 mod net;
 mod platform;
 mod proto;
+mod secret;
 mod update;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
-use proto::Msg;
+use proto::{Hotkey, Msg, Side};
 use std::{
     io::BufRead,
     net::{TcpListener, TcpStream},
@@ -28,13 +32,23 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Run on the machine that has the physical keyboard and mouse.
-    /// Press Ctrl+Alt+K to switch input between this machine and the client.
+    /// Press the switch shortcut (default Ctrl+Alt+K) to switch input between this machine and the client.
     Server {
         #[arg(long, default_value_t = 24800)]
         port: u16,
         /// Shared passphrase (or set MKSHARE_PASS)
         #[arg(long, env = "MKSHARE_PASS")]
         pass: String,
+        /// Switch shortcut, e.g. "ctrl+alt+k", "ctrl+shift+f9" or "f12"
+        #[arg(long, default_value = "ctrl+alt+k")]
+        hotkey: String,
+        /// Switch by moving the mouse off this screen edge: left, right, top or bottom
+        /// (the side where the other computer sits). Off by default.
+        #[arg(long)]
+        edge: Option<String>,
+        /// Do not share the clipboard (copied text) with the client
+        #[arg(long)]
+        no_clipboard: bool,
         /// Used by the app: read "toggle" commands from stdin, exit when stdin closes
         #[arg(long, hide = true)]
         stdin_control: bool,
@@ -48,6 +62,12 @@ enum Cmd {
         port: u16,
         #[arg(long, env = "MKSHARE_PASS")]
         pass: String,
+        /// Server name: if the address stops working, look for the server by this name
+        #[arg(long)]
+        name: Option<String>,
+        /// Do not share the clipboard (copied text) with the server
+        #[arg(long)]
+        no_clipboard: bool,
         /// Used by the app: exit when stdin closes
         #[arg(long, hide = true)]
         stdin_control: bool,
@@ -62,12 +82,19 @@ fn main() -> Result<()> {
             #[cfg(windows)]
             attach_console();
             match cmd {
-                Cmd::Server { port, pass, stdin_control } => run_server(port, pass, stdin_control),
-                Cmd::Client { host, port, pass, stdin_control } => {
+                Cmd::Server { port, pass, hotkey, edge, no_clipboard, stdin_control } => {
+                    let hotkey = Hotkey::parse(&hotkey).map_err(|e| anyhow!("Error: invalid --hotkey: {e}"))?;
+                    let edge = match edge.as_deref() {
+                        None | Some("off") | Some("") => None,
+                        Some(s) => Some(Side::parse(s).ok_or_else(|| anyhow!("Error: --edge must be left, right, top, bottom or off"))?),
+                    };
+                    run_server(port, pass, stdin_control, hotkey, edge, !no_clipboard)
+                }
+                Cmd::Client { host, port, pass, name, no_clipboard, stdin_control } => {
                     if stdin_control {
                         watch_stdin(None);
                     }
-                    run_client(&host, port, &pass)
+                    run_client(&host, port, &pass, name, !no_clipboard)
                 }
             }
         }
@@ -133,21 +160,35 @@ fn watch_stdin(core: Option<Arc<core::Core>>) {
 
 // ---------------------------------------------------------------- server
 
-fn run_server(port: u16, pass: String, stdin_control: bool) -> Result<()> {
-    let core = Arc::new(core::Core::default());
+fn run_server(port: u16, pass: String, stdin_control: bool, hotkey: Hotkey, edge: Option<Side>, share_clipboard: bool) -> Result<()> {
+    let core = Arc::new(core::Core::new(hotkey, edge));
+    let clip = if share_clipboard {
+        let c = core.clone();
+        let cb = clipboard::start(move |text| c.send_msg(Msg::Clipboard(text)));
+        if cb.is_some() {
+            println!("Clipboard sharing is on.");
+        }
+        cb
+    } else {
+        None
+    };
     if stdin_control {
         watch_stdin(Some(core.clone()));
     }
     let listener = TcpListener::bind(("0.0.0.0", port)).with_context(|| format!("cannot bind port {port}"))?;
-    println!("Listening on port {port}. Switch input with Ctrl+Alt+K once a client is connected.");
+    discovery::spawn_responder(discovery::UDP_PORT, port);
+    println!("Listening on port {port}. Switch input with {} once a client is connected.", hotkey.pretty());
+    if let Some(side) = core.edge() {
+        println!("Screen-edge switching is on: the other computer is on the {} side.", side.name());
+    }
     {
         let core = core.clone();
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let (core, pass) = (core.clone(), pass.clone());
+                let (core, pass, clip) = (core.clone(), pass.clone(), clip.clone());
                 thread::spawn(move || {
                     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-                    if let Err(e) = serve(core, stream, &pass, &peer) {
+                    if let Err(e) = serve(core, stream, &pass, &peer, clip) {
                         eprintln!("Connection from {peer} ended: {e:#}");
                     }
                 });
@@ -157,7 +198,7 @@ fn run_server(port: u16, pass: String, stdin_control: bool) -> Result<()> {
     platform::capture(core) // blocks forever
 }
 
-fn serve(core: Arc<core::Core>, stream: TcpStream, pass: &str, peer: &str) -> Result<()> {
+fn serve(core: Arc<core::Core>, stream: TcpStream, pass: &str, peer: &str, clip: Option<clipboard::Clipboard>) -> Result<()> {
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -169,8 +210,15 @@ fn serve(core: Arc<core::Core>, stream: TcpStream, pass: &str, peer: &str) -> Re
     let reader_core = core.clone();
     thread::spawn(move || {
         while let Ok(msg) = reader.recv() {
-            if let Msg::Toggle = msg {
-                reader_core.set_remote(!reader_core.is_remote());
+            match msg {
+                Msg::Toggle => reader_core.set_remote(!reader_core.is_remote()),
+                Msg::Leave { x, y } => reader_core.leave_remote(x, y),
+                Msg::Clipboard(text) => {
+                    if let Some(c) = &clip {
+                        c.set(text);
+                    }
+                }
+                _ => {}
             }
         }
     });
@@ -196,20 +244,46 @@ fn serve(core: Arc<core::Core>, stream: TcpStream, pass: &str, peer: &str) -> Re
 
 // ---------------------------------------------------------------- client
 
-fn run_client(host: &str, port: u16, pass: &str) -> Result<()> {
+fn run_client(host: &str, port: u16, pass: &str, name: Option<String>, share_clipboard: bool) -> Result<()> {
     let mut injector = platform::Injector::new()?;
+    let clip = if share_clipboard {
+        clipboard::start(|text| {
+            if let Some(tx) = CLIENT_TX.lock().unwrap().as_ref() {
+                let _ = tx.send(Msg::Clipboard(text));
+            }
+        })
+    } else {
+        None
+    };
+    let (mut host, mut port) = (host.to_string(), port);
     println!("Connecting to {host}:{port} ...");
+    let mut failures = 0;
     loop {
-        match client_session(host, port, pass, &mut injector) {
-            Ok(()) => {}
-            Err(e) => eprintln!("Disconnected: {e:#}"),
+        match client_session(&host, port, pass, &mut injector, clip.as_ref()) {
+            Ok(()) => failures = 0,
+            Err(e) => {
+                eprintln!("Disconnected: {e:#}");
+                failures += 1;
+            }
         }
         injector.release_all();
+        // The server's address may have changed (new IP from the router): look for it by name.
+        if failures >= 2 {
+            if let Some(name) = &name {
+                if let Some(f) = discovery::scan(Duration::from_millis(1500)).into_iter().find(|f| &f.name == name) {
+                    if f.addr != host || f.port != port {
+                        println!("Found {name} at {}:{}", f.addr, f.port);
+                        (host, port) = (f.addr, f.port);
+                    }
+                    failures = 0;
+                }
+            }
+        }
         thread::sleep(Duration::from_secs(3));
     }
 }
 
-fn client_session(host: &str, port: u16, pass: &str, inj: &mut platform::Injector) -> Result<()> {
+fn client_session(host: &str, port: u16, pass: &str, inj: &mut platform::Injector, clip: Option<&clipboard::Clipboard>) -> Result<()> {
     let stream = TcpStream::connect((host, port))?;
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?; // handshake
@@ -229,10 +303,40 @@ fn client_session(host: &str, port: u16, pass: &str, inj: &mut platform::Injecto
         }
     });
 
+    let mut edge = edge::ClientEdge::new(platform::screen_rect());
     let result = (|| loop {
         match ch.recv()? {
-            Msg::Ping | Msg::Hello | Msg::Toggle => {}
-            Msg::Active(on) => println!("Active: {}", if on { "on" } else { "off" }),
+            Msg::Ping | Msg::Hello | Msg::Toggle | Msg::Leave { .. } => {}
+            Msg::Active(on) => {
+                edge.set_active(on);
+                println!("Active: {}", if on { "on" } else { "off" });
+            }
+            Msg::EdgeConfig { back } => {
+                edge.set_config(back);
+                if back.is_some() && !edge.can_track() {
+                    eprintln!("Moving back by the screen edge is unavailable here: screen size unknown (set MKSHARE_SCREEN=WIDTHxHEIGHT).");
+                }
+            }
+            Msg::Clipboard(text) => {
+                if let Some(c) = clip {
+                    c.set(text);
+                }
+            }
+            Msg::Enter { x, y } => {
+                platform::warp(x, y);
+                edge.entered(x, y);
+            }
+            Msg::Move { dx, dy } => {
+                if let Some((x, y)) = edge.check_leave(dx, dy, platform::cursor_pos()) {
+                    // pushed against the edge that leads back to the server: hand input back
+                    if let Some(tx) = CLIENT_TX.lock().unwrap().as_ref() {
+                        let _ = tx.send(Msg::Leave { x, y });
+                    }
+                } else {
+                    inj.apply(&Msg::Move { dx, dy });
+                    edge.moved(dx, dy);
+                }
+            }
             m => inj.apply(&m),
         }
     })();

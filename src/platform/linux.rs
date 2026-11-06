@@ -4,15 +4,15 @@
 //! run as root, or add your user to the `input` group and install the udev rule
 //! described in the README.
 
-use crate::{core::Core, proto::*};
+use crate::{core::Core, edge::Rect, proto::*};
 use anyhow::{bail, Context, Result};
 use evdev::{
     uinput::{VirtualDevice, VirtualDeviceBuilder},
-    AttributeSet, Device, EventType, InputEvent, Key, RelativeAxisType,
+    AbsInfo, AbsoluteAxisType, AttributeSet, Device, EventType, InputEvent, Key, RelativeAxisType, UinputAbsSetup,
 };
 use std::{
     collections::HashSet,
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -32,7 +32,80 @@ fn btn_index(code: u16) -> Option<u8> {
 
 pub fn on_switch(_on: bool) {}
 
+// ------------------------------------------------- screen size and cursor placement
+
+const ABS_MAX: i32 = 32767;
+static WARP: OnceLock<Mutex<Option<VirtualDevice>>> = OnceLock::new();
+
+fn build_warp_device() -> Result<VirtualDevice> {
+    let mut keys = AttributeSet::<Key>::new();
+    keys.insert(Key::BTN_LEFT); // makes desktops treat it as a pointer
+    let info = AbsInfo::new(0, 0, ABS_MAX, 0, 0, 0);
+    Ok(VirtualDeviceBuilder::new()
+        .context("cannot open /dev/uinput (permission?)")?
+        .name("mkshare cursor placement")
+        .with_keys(&keys)?
+        .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisType::ABS_X, info))?
+        .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisType::ABS_Y, info))?
+        .build()?)
+}
+
+/// Create the helper device used to place the cursor. Call early: desktops need a
+/// moment to notice a new input device.
+pub fn init() {
+    WARP.get_or_init(|| {
+        Mutex::new(
+            build_warp_device()
+                .map_err(|e| eprintln!("Cursor placement unavailable: {e:#}"))
+                .ok(),
+        )
+    });
+}
+
+/// Put the cursor at a position given as fractions (0..1) of the screen.
+pub fn warp(xf: f32, yf: f32) {
+    init();
+    let v = |f: f32| (f.clamp(0.002, 0.998) * ABS_MAX as f32) as i32;
+    let Some(slot) = WARP.get() else { return };
+    if let Some(dev) = slot.lock().unwrap().as_mut() {
+        let _ = dev.emit(&[
+            InputEvent::new(EventType::ABSOLUTE, AbsoluteAxisType::ABS_X.0, v(xf)),
+            InputEvent::new(EventType::ABSOLUTE, AbsoluteAxisType::ABS_Y.0, v(yf)),
+        ]);
+    }
+}
+
+/// The real cursor position cannot be read on Wayland; the caller estimates it.
+pub fn cursor_pos() -> Option<(i32, i32)> {
+    None
+}
+
+/// Screen size: `MKSHARE_SCREEN=1920x1080` if set, otherwise the first connected display's mode.
+pub fn screen_rect() -> Option<Rect> {
+    let parse = |s: &str| -> Option<Rect> {
+        let (w, h) = s.trim().split_once(['x', 'X'])?;
+        let h: String = h.chars().take_while(|c| c.is_ascii_digit()).collect(); // "1080i" -> 1080
+        let (w, h) = (w.trim().parse().ok()?, h.parse().ok()?);
+        (w > 0 && h > 0).then_some(Rect { x: 0, y: 0, w, h })
+    };
+    if let Ok(v) = std::env::var("MKSHARE_SCREEN") {
+        return parse(&v);
+    }
+    let mut dirs: Vec<_> = std::fs::read_dir("/sys/class/drm").ok()?.flatten().map(|e| e.path()).collect();
+    dirs.sort();
+    for p in dirs {
+        let connected = std::fs::read_to_string(p.join("status")).map_or(false, |s| s.trim() == "connected");
+        if connected {
+            if let Some(r) = std::fs::read_to_string(p.join("modes")).ok().and_then(|m| m.lines().next().and_then(parse)) {
+                return Some(r);
+            }
+        }
+    }
+    None
+}
+
 pub fn capture(core: Arc<Core>) -> Result<()> {
+    init();
     let mut handles = Vec::new();
     for (_path, dev) in evdev::enumerate() {
         let name = dev.name().unwrap_or("unknown").to_string();
@@ -130,6 +203,7 @@ fn process(core: &Core, vdev: &mut VirtualDevice, pressed: &mut HashSet<u16>, ba
     }
 
     let (mut dx, mut dy, mut wx, mut wy) = (0, 0, 0, 0);
+    let (mut ldx, mut ldy) = (0, 0); // movement passed through locally (for edge detection)
     let mut pass: Vec<InputEvent> = Vec::new();
     for ev in batch.drain(..) {
         let (code, val) = (ev.code(), ev.value());
@@ -159,6 +233,11 @@ fn process(core: &Core, vdev: &mut VirtualDevice, pressed: &mut HashSet<u16>, ba
                         _ => {} // hi-res wheel duplicates REL_WHEEL
                     }
                 } else {
+                    match code {
+                        REL_X => ldx += val,
+                        REL_Y => ldy += val,
+                        _ => {}
+                    }
                     pass.push(ev);
                 }
             }
@@ -168,6 +247,11 @@ fn process(core: &Core, vdev: &mut VirtualDevice, pressed: &mut HashSet<u16>, ba
                 }
             }
         }
+    }
+    // Screen-edge switching: if this movement reached the edge, input moves to the other computer
+    // and the rest of the movement must not reach this one.
+    if !core.is_remote() && (ldx != 0 || ldy != 0) && core.on_local_delta(ldx, ldy) {
+        pass.retain(|e| !(e.event_type() == EventType::RELATIVE && (e.code() == REL_X || e.code() == REL_Y)));
     }
     if dx != 0 || dy != 0 {
         core.on_event(InEvent::Move(dx, dy));
@@ -193,6 +277,7 @@ pub struct Injector {
 
 impl Injector {
     pub fn new() -> Result<Self> {
+        init();
         let mut keys = AttributeSet::<Key>::new();
         for c in 1..=248u16 {
             keys.insert(Key::new(c));
@@ -283,6 +368,7 @@ impl Injector {
             }
             Msg::ReleaseAll => self.release_all(),
             Msg::Hello | Msg::Ping | Msg::Toggle | Msg::Active(_) => {}
+            Msg::EdgeConfig { .. } | Msg::Enter { .. } | Msg::Leave { .. } | Msg::Clipboard(_) => {}
         }
     }
 

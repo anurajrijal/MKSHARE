@@ -80,10 +80,49 @@ fn evdev_to_scan(code: u16) -> Option<(u16, bool)> {
 
 // ---------------------------------------------------------------- capture
 
+fn dpi_aware() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    // without this, Windows reports scaled (wrong) screen sizes and cursor positions
+    ONCE.call_once(|| unsafe {
+        SetProcessDPIAware();
+    });
+}
+
+/// The whole desktop (all monitors).
+pub fn screen_rect() -> Option<crate::edge::Rect> {
+    dpi_aware();
+    unsafe {
+        let r = crate::edge::Rect {
+            x: GetSystemMetrics(SM_XVIRTUALSCREEN),
+            y: GetSystemMetrics(SM_YVIRTUALSCREEN),
+            w: GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            h: GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        };
+        (r.w > 0 && r.h > 0).then_some(r)
+    }
+}
+
+/// The real cursor position.
+pub fn cursor_pos() -> Option<(i32, i32)> {
+    unsafe {
+        let mut p: POINT = zeroed();
+        (GetCursorPos(&mut p) != 0).then_some((p.x, p.y))
+    }
+}
+
+/// Put the cursor at a position given as fractions (0..1) of the desktop, a few pixels inside the edge.
+pub fn warp(xf: f32, yf: f32) {
+    let Some(r) = screen_rect() else { return };
+    let place = |f: f32, origin: i32, len: i32| origin + ((f.clamp(0.0, 1.0) * (len - 1) as f32) as i32).clamp(3, (len - 4).max(3));
+    unsafe {
+        SetCursorPos(place(xf, r.x, r.w), place(yf, r.y, r.h));
+    }
+}
+
 pub fn capture(core: Arc<Core>) -> Result<()> {
     let _ = CORE.set(core);
     unsafe {
-        SetProcessDPIAware();
+        dpi_aware();
         let hmod = GetModuleHandleW(std::ptr::null());
         let kh = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), hmod, 0);
         let mh = SetWindowsHookExW(WH_MOUSE_LL, Some(ms_proc), hmod, 0);
@@ -121,8 +160,25 @@ unsafe extern "system" fn ms_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT 
     if code == HC_ACTION as i32 {
         if let Some(core) = CORE.get() {
             let m = &*(lp as *const MSLLHOOKSTRUCT);
+            let hi = (m.mouseData >> 16) as u16;
+            if m.flags & LLMHF_INJECTED == 0 && !core.is_remote() {
+                // Input is local: watch the cursor for the screen edge and track button state.
+                match wp as u32 {
+                    WM_MOUSEMOVE => {
+                        if core.on_local_abs(m.pt.x, m.pt.y) {
+                            return 1; // just crossed to the other computer
+                        }
+                    }
+                    WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
+                        core.local_button(true);
+                    }
+                    WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP | WM_XBUTTONUP => {
+                        core.local_button(false);
+                    }
+                    _ => {}
+                }
+            }
             if m.flags & LLMHF_INJECTED == 0 && core.is_remote() {
-                let hi = (m.mouseData >> 16) as u16;
                 let delta = (m.mouseData >> 16) as u16 as i16 as i32;
                 let ev = match wp as u32 {
                     WM_MOUSEMOVE => {
@@ -227,6 +283,7 @@ pub struct Injector {
 
 impl Injector {
     pub fn new() -> Result<Self> {
+        dpi_aware();
         Ok(Injector { keys: HashSet::new(), buttons: HashSet::new() })
     }
 
@@ -275,6 +332,7 @@ impl Injector {
                 }
                 Msg::ReleaseAll => self.release_all(),
                 Msg::Hello | Msg::Ping | Msg::Toggle | Msg::Active(_) => {}
+                Msg::EdgeConfig { .. } | Msg::Enter { .. } | Msg::Leave { .. } | Msg::Clipboard(_) => {}
             }
         }
     }

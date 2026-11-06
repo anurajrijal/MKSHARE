@@ -29,7 +29,11 @@ MKShare is a small, fast desktop app written in Rust. It runs on **Windows** and
 ## Features
 
 - **Graphical app**: pick Server or Client, enter a passphrase, press Start.
-- **Switch from either computer**: a button on the server, a button on the client, or the `Ctrl+Alt+K` hotkey.
+- **Finds the server for you**: the client lists MKShare servers on your network, so you do not type an IP address (and it re-finds the server by name if its IP changes).
+- **Screen-edge switching** (optional): move the mouse off the edge of the screen to cross to the other computer, and push against the opposite edge to come back. You choose which side the other computer is on, and you can turn it off.
+- **Your own shortcut**: switch with a keyboard shortcut you choose (default `Ctrl+Alt+K`).
+- **Switch from either computer**: a button on the server, a button on the client, the shortcut, or the screen edge.
+- **Shared clipboard**: copy text on one computer and paste it on the other (text only, up to 32 KB; you can turn it off).
 - **Built-in updates**: an **Update application** button installs new releases from GitHub.
 - **Cross-platform**: Windows 10/11 and Linux (Debian/Ubuntu `.deb` provided).
 - **Wayland-ready on Linux**: input is captured and injected at the kernel level (evdev/uinput), so it does not depend on X11.
@@ -65,6 +69,8 @@ MKShare is a small, fast desktop app written in Rust. It runs on **Windows** and
 - In **local** mode the server behaves like a normal computer.
 - In **remote** mode the server stops delivering input to itself and sends every event to the client instead.
 - The server tells the client whether it is currently the one receiving input, and the client can ask the server to switch (`Toggle`). That is how the switch button works on both sides.
+- With screen-edge switching on, the server detects the cursor reaching the chosen edge and sends `Enter` so the client places its cursor on the opposite edge at the same height. The client watches its return edge and sends `Leave` to hand input back.
+- Finding servers: the client broadcasts a small UDP query (port `24801`); servers answer with their name and port. Only the name is revealed. Connecting still needs the passphrase.
 - On Linux the server grabs your keyboards and mice and re-emits their events through a virtual device while in local mode. That is what makes it possible to cleanly take input away on a switch.
 
 ### One program, two roles
@@ -88,10 +94,12 @@ The window starts the real server or client as a background process, so **Stop**
 
 1. **Install** MKShare on both computers (see [Installation](#installation)).
 2. On the computer with the keyboard and mouse: open MKShare, choose **Server**, type a passphrase, press **Start**. Note the address it shows (for example `192.168.1.79`).
-3. On the other computer: open MKShare, choose **Client**, enter that address and the **same passphrase**, press **Start**.
-4. Switch: press **`Ctrl+Alt+K`** on the server's keyboard, or click the switch button in either window. Your keyboard and mouse now control the other computer. Switch again to return.
+3. On the other computer: open MKShare, choose **Client**. It looks for servers by itself: click your server in the list (or type its address), enter the **same passphrase**, press **Start**.
+4. Switch: press the shortcut (default **`Ctrl+Alt+K`**) on the server's keyboard, click the switch button in either window, or, if you turned it on, move the mouse off the screen edge. Your keyboard and mouse now control the other computer. Switch again to return.
 
-Both computers must be on the same network, and the server's TCP port (default `24800`) must be reachable.
+Both computers must be on the same network, and the server's TCP port (default `24800`) and UDP port `24801` (for finding servers) must be reachable.
+
+**Both computers must run the same version** of MKShare: version 0.3 added new messages that older versions do not understand.
 
 ## Installation
 
@@ -115,7 +123,7 @@ Run `mkshare.exe`. It is a standalone program and needs no installer.
 ### Debian / Ubuntu (22.04 or newer, 64-bit Intel/AMD)
 
 ```bash
-sudo apt install ./mkshare_0.2.0-1_amd64.deb
+sudo apt install ./mkshare_0.3.0-1_amd64.deb
 sudo usermod -aG input $USER      # then log out and back in
 ```
 
@@ -130,7 +138,7 @@ Use the standalone `mkshare-linux-x86_64` binary (needs glibc 2.31 or newer) and
 | Field | Meaning |
 |---|---|
 | **Server / Client** | Server = the computer the keyboard and mouse are plugged into. Client = the computer that receives them. |
-| **Server address** (client only) | IP address or hostname of the server. |
+| **Server address** (client only) | IP address or hostname of the server. Use **Find servers** to pick it from a list instead. |
 | **Port** | TCP port. Default `24800`. Must match on both sides. |
 | **Passphrase** | Shared secret. Must match on both sides. |
 
@@ -141,7 +149,12 @@ Your settings are saved automatically in:
 - Windows: `%APPDATA%\mkshare\config.json`
 - Linux: `~/.config/mkshare/config.json`
 
-> The passphrase is stored in that file in plain text.
+The passphrase is **not** kept in that file. With **Remember passphrase** ticked (the default) it is stored in protected storage:
+
+- Windows: encrypted with your Windows account (DPAPI) in `%APPDATA%\mkshare\pass.dpapi`
+- Linux: the system keyring (GNOME Keyring / KWallet) via `secret-tool`, which the `.deb` recommends (`libsecret-tools`). Without it, a file readable only by you (`~/.config/mkshare/pass`, mode 0600).
+
+Untick **Remember passphrase** and nothing is stored; you type it each time. Settings from older versions that held the passphrase in plain text are migrated automatically.
 
 ### Switching
 
@@ -151,11 +164,25 @@ You can switch from either computer:
 |---|---|
 | Server | The **Send keyboard and mouse to the other computer** button |
 | Client | The **Use the other computer's keyboard and mouse** button (it becomes **Send keyboard and mouse back to the other computer** while you are using them) |
-| Server's keyboard | `Ctrl` + `Alt` + `K`, from the keyboard that is plugged into the server |
+| Server's keyboard | The switch shortcut (default `Ctrl+Alt+K`) |
+| Screen edge | Optional: move the mouse off the screen edge facing the other computer |
+
+**Changing the shortcut** (server, while stopped): under **Switching**, tick the modifiers you want (Ctrl, Alt, Shift, Win) and pick the key from the list. A shortcut needs at least one modifier, unless it is an F-key, Pause or ScrollLock, so it cannot fire while you type. It is saved and used the next time you press **Start**.
+
+**Screen-edge switching** (server, off by default): tick **Also switch by moving the mouse to the screen edge** and choose which side the other computer is on (Left, Right, Top or Bottom). The cursor then crosses over when it reaches that edge and appears on the matching edge of the other screen at the same height. On the other computer, push the mouse against the opposite edge to come back. It does not trigger while a mouse button is held, so dragging is never interrupted. Untick the option to turn it off; the shortcut and buttons keep working either way.
+
+- Windows uses the real cursor position across all monitors.
+- On Linux the position is estimated from mouse movement, so crossing can be slightly early or late until the cursor has touched an edge once. The screen size is read from the display (`/sys/class/drm`); if it cannot be detected, set it yourself, for example `MKSHARE_SCREEN=1920x1080`. On Linux only one screen's size is used.
+
+### Clipboard
+
+With **Share the clipboard** ticked (the default, on both computers), text you copy on one computer can be pasted on the other, in both directions. Only text is shared (not images or files), up to 32 KB, and only text copied after MKShare started. Each computer has its own checkbox, so untick it on a computer to stop sending and receiving there. Anything you copy is sent to the other computer, so turn it off while copying passwords or other private text. The text travels over the same encrypted connection as the keyboard and mouse.
+
+On Linux, clipboard access needs a desktop session (X11, or a Wayland desktop that supports the data-control protocol such as KDE and Sway; GNOME on Wayland does not allow it). If the clipboard cannot be opened, MKShare logs a message and keeps sharing the keyboard and mouse.
 
 ### Updating
 
-Click **Update application** at the bottom of the window. MKShare checks the latest release of this project on GitHub (`anurajrijal/MKSHARE`; the repository can be changed under **Update settings**) and, if a newer version exists, offers to install it. Installing stops sharing, replaces the program and restarts it.
+Click **Update application** at the bottom of the window. MKShare checks the latest release of this project on GitHub (`anurajrijal/MKSHARE`) and, if a newer version exists, offers to install it. Installing stops sharing, replaces the program and restarts it.
 
 - Windows and the standalone Linux binary replace themselves.
 - A Debian/Ubuntu install is upgraded with `apt` after a graphical password prompt (`pkexec`). Reopen MKShare afterwards.
@@ -165,7 +192,7 @@ Click **Update application** at the bottom of the window. MKShare checks the lat
 **Publishing a release** (maintainers): set `version` in `Cargo.toml`, commit and push, then push a matching tag:
 
 ```bash
-git tag v0.2.0 && git push origin v0.2.0
+git tag v0.3.0 && git push origin v0.3.0
 ```
 
 `.github/workflows/release.yml` builds the Windows `.exe`, the Linux binary and the `.deb`, and attaches them to the release together with `SHA256SUMS.txt`.
@@ -175,9 +202,15 @@ git tag v0.2.0 && git push origin v0.2.0
 Running `mkshare` with no arguments opens the app. These subcommands run it headless:
 
 ```text
-mkshare server [--port 24800] --pass <PASSPHRASE>
-mkshare client  --host <ADDRESS> [--port 24800] --pass <PASSPHRASE>
+mkshare server [--port 24800] --pass <PASSPHRASE> [--hotkey ctrl+alt+k] [--edge left|right|top|bottom] [--no-clipboard]
+mkshare client  --host <ADDRESS> [--port 24800] --pass <PASSPHRASE> [--name <SERVER NAME>] [--no-clipboard]
 ```
+
+- `--no-clipboard`: do not share the clipboard on this computer.
+
+- `--hotkey`: the switch shortcut, for example `ctrl+alt+k`, `ctrl+shift+f9` or `f12` (modifiers: `ctrl`, `alt`, `shift`, `win`).
+- `--edge`: turn on screen-edge switching; the value is the side where the other computer sits. Leave it out to keep it off.
+- `--name`: if the client can no longer reach the server's address, it looks for a server with this name on the network.
 
 The passphrase can also be supplied with the `MKSHARE_PASS` environment variable, which keeps it out of the process list.
 
@@ -213,7 +246,7 @@ For a quick test you can instead start MKShare with `sudo`.
 - Every message is encrypted and authenticated with **ChaCha20-Poly1305** using a counter nonce, so tampering and replay are rejected. A client that does not know the passphrase cannot complete the handshake.
 - Choose a **long, unique passphrase**. Someone who can capture your network traffic could attempt to guess a weak passphrase offline.
 - Keystrokes you type, including passwords, travel over this connection while input is on the other computer. Use MKShare on networks you trust.
-- The passphrase is stored unencrypted in the local config file.
+- The passphrase is stored in protected storage (see [Using the app](#using-the-app)), never in plain text in the settings file. Anything running as your own user account can still ask the system for it, so treat the passphrase as a remote-control credential and do not reuse it elsewhere.
 - Updates are downloaded over HTTPS from GitHub and checked against `SHA256SUMS.txt`. The program itself is not code-signed.
 
 ## Troubleshooting
@@ -222,7 +255,11 @@ For a quick test you can instead start MKShare with `sudo`.
 |---|---|
 | Client cannot connect | Check the address, that both machines are on the same network, and that the firewall allows TCP port `24800` on the server. |
 | *wrong passphrase* in the server log | The passphrases differ. Retype them on both sides. |
-| Switching does nothing | The client must be connected first (status *Connected*). The hotkey is read from the server's keyboard. |
+| Switching does nothing | The client must be connected first (status *Connected*). The shortcut is read from the server's keyboard. |
+| *No servers found* | The server must be running (status *Waiting*) on the same network, and the firewall must allow UDP port `24801`. You can always type the address instead. |
+| The client cannot connect after updating one computer | Both computers must run the same MKShare version. Update the other one too. |
+| Screen edge does nothing (Linux) | The screen size could not be detected. Set `MKSHARE_SCREEN=1920x1080` (your resolution) before starting MKShare. |
+| The cursor crosses early or late (Linux) | The Linux cursor position is estimated. Touch the screen edge once to re-sync, or use the shortcut. |
 | Linux: *no readable keyboard/mouse found* | See [Linux permissions](#linux-permissions): join the `input` group and log out and in, or run with `sudo`. |
 | Linux: cannot open `/dev/uinput` | The udev rule is not active yet. Reload udev rules and log in again, or use `sudo`. |
 | Linux server: a newly plugged-in device is ignored | Press **Stop** then **Start**. Devices are detected when the server starts. |
@@ -290,9 +327,13 @@ MKSHARE/
 `-- src/
     |-- main.rs                entry point: no arguments = GUI; "server" / "client" = headless
     |-- gui.rs                 desktop window (egui): settings, status, buttons, log
-    |-- core.rs                hotkey handling and local/remote routing on the server
+    |-- clipboard.rs           clipboard text sharing (background thread that watches and sets the clipboard)
+    |-- core.rs                switch shortcut, edge detection and local/remote routing on the server
+    |-- edge.rs                screen-edge geometry and cursor tracking (platform independent, unit-tested)
+    |-- discovery.rs           finds servers on the LAN (UDP broadcast query / reply)
     |-- net.rs                 encrypted, authenticated message framing over TCP
-    |-- proto.rs               wire messages and key-code conventions
+    |-- proto.rs               wire messages, key-code conventions, the switch shortcut type
+    |-- secret.rs              protected passphrase storage (Windows DPAPI / Linux keyring)
     |-- update.rs              "Update application": check, download, install from GitHub Releases
     `-- platform/
         |-- mod.rs             picks the backend for the current OS
@@ -304,10 +345,11 @@ Local build output goes to `target/` and `dist/`; both are git-ignored.
 
 ## Limitations
 
-- Switching is by hotkey or button only (no moving the cursor off the screen edge).
+- Screen-edge switching on Linux is approximate (see above), and it supports one display there.
 - One client at a time.
+- Server discovery needs UDP broadcast, which some Wi-Fi networks block (typing the address always works).
 - Linux server mode shares keyboards and mice, not touchpads.
-- No clipboard or file sharing.
+- The clipboard shares plain text only (no images, files or formatted text). There is no file sharing.
 - Pointer speed on the client follows that machine's own pointer settings.
 - The connection is not forward-secret and uses a pre-shared passphrase rather than certificates.
 

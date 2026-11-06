@@ -18,7 +18,8 @@ use std::{
 
 const ROUNDS: u32 = 100_000;
 const SALT_LEN: usize = 16;
-const MAX_FRAME: usize = 4096;
+/// Frame length is a u16; clipboard text (up to 32 KiB) must fit.
+const MAX_FRAME: usize = u16::MAX as usize;
 
 pub struct Secure {
     stream: TcpStream,
@@ -106,6 +107,9 @@ impl Secure {
             .cipher
             .encrypt(&nonce(self.send_dir, self.send_ctr), pt.as_slice())
             .map_err(|_| anyhow!("encrypt failed"))?;
+        if ct.len() > MAX_FRAME {
+            bail!("message too large");
+        }
         self.send_ctr += 1;
         let mut buf = Vec::with_capacity(2 + ct.len());
         buf.extend_from_slice(&(ct.len() as u16).to_be_bytes());
@@ -129,5 +133,30 @@ impl Secure {
             .map_err(|_| anyhow!("authentication failed"))?;
         self.recv_ctr += 1;
         Ok(bincode::deserialize(&pt)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn large_clipboard_message_roundtrip() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            let mut ch = Secure::accept(s, "pw").unwrap();
+            ch.recv().unwrap()
+        });
+        let mut client = Secure::connect(TcpStream::connect(addr).unwrap(), "pw").unwrap();
+        let text = "\u{e9}".repeat(crate::clipboard::MAX_TEXT / 2); // worst case: exactly MAX_TEXT bytes
+        assert_eq!(text.len(), crate::clipboard::MAX_TEXT);
+        client.send(&Msg::Clipboard(text.clone())).unwrap();
+        match server.join().unwrap() {
+            Msg::Clipboard(t) => assert_eq!(t, text),
+            _ => panic!("wrong message"),
+        }
     }
 }
