@@ -1,5 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod autostart;
 mod clipboard;
 mod core;
 mod discovery;
@@ -9,6 +10,7 @@ mod net;
 mod platform;
 mod proto;
 mod secret;
+mod tray;
 mod update;
 
 use anyhow::{anyhow, Context, Result};
@@ -25,6 +27,9 @@ use std::{
 #[derive(Parser)]
 #[command(name = "mkshare", version, about = "Share one keyboard and mouse between machines (Windows/Linux). Run without arguments to open the app.")]
 struct Cli {
+    /// Used by "start on login": open the app minimized (to the tray on Windows)
+    #[arg(long, hide = true)]
+    background: bool,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -77,7 +82,7 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse_from(std::env::args_os());
     match cli.cmd {
-        None => gui::run(),
+        None => gui::run(cli.background),
         Some(cmd) => {
             #[cfg(windows)]
             attach_console();

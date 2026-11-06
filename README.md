@@ -34,6 +34,7 @@ MKShare is a small, fast desktop app written in Rust. It runs on **Windows** and
 - **Your own shortcut**: switch with a keyboard shortcut you choose (default `Ctrl+Alt+K`).
 - **Switch from either computer**: a button on the server, a button on the client, the shortcut, or the screen edge.
 - **Shared clipboard**: copy text on one computer and paste it on the other (text only, up to 32 KB; you can turn it off).
+- **Runs in the background**: on Windows, closing the window keeps MKShare in the system tray; optionally it starts when you sign in and connects by itself.
 - **Built-in updates**: an **Update application** button installs new releases from GitHub.
 - **Cross-platform**: Windows 10/11 and Linux (Debian/Ubuntu `.deb` provided).
 - **Wayland-ready on Linux**: input is captured and injected at the kernel level (evdev/uinput), so it does not depend on X11.
@@ -179,6 +180,18 @@ You can switch from either computer:
 With **Share the clipboard** ticked (the default, on both computers), text you copy on one computer can be pasted on the other, in both directions. Only text is shared (not images or files), up to 32 KB, and only text copied after MKShare started. Each computer has its own checkbox, so untick it on a computer to stop sending and receiving there. Anything you copy is sent to the other computer, so turn it off while copying passwords or other private text. The text travels over the same encrypted connection as the keyboard and mouse.
 
 On Linux, clipboard access needs a desktop session (X11, or a Wayland desktop that supports the data-control protocol such as KDE and Sway; GNOME on Wayland does not allow it). If the clipboard cannot be opened, MKShare logs a message and keeps sharing the keyboard and mouse.
+
+### Startup and tray
+
+On the **Settings** page, under **Startup**:
+
+- **Start MKShare when I sign in**: adds MKShare to your own login items (Windows: the `Run` registry key of your user; Linux: `~/.config/autostart/mkshare.desktop`). No administrator rights are needed, and unticking it removes the entry. MKShare then starts with `--background`: hidden in the tray on Windows, minimized on Linux.
+- **Connect automatically when MKShare opens**: starts sharing by itself with your saved settings. Tick **Remember passphrase** on the Home page too, otherwise there is no passphrase to connect with.
+- **Keep MKShare running in the tray when I close the window** (Windows, on by default): the close button hides the window and sharing continues. The tray icon (near the clock) shows the status when you hover over it; click it to open the window, or right-click it and choose **Quit** to exit completely.
+
+Linux has no tray icon: closing the window quits MKShare.
+
+Move or reinstall the program and the start-on-login entry points at the old location: untick and tick the option again to update it.
 
 ### Updating
 
@@ -327,6 +340,8 @@ MKSHARE/
 `-- src/
     |-- main.rs                entry point: no arguments = GUI; "server" / "client" = headless
     |-- gui.rs                 desktop window (egui): settings, status, buttons, log
+    |-- autostart.rs           start on login (Windows Run key / Linux autostart file)
+    |-- tray.rs                Windows tray icon (open, quit, status tooltip); no-op on Linux
     |-- clipboard.rs           clipboard text sharing (background thread that watches and sets the clipboard)
     |-- core.rs                switch shortcut, edge detection and local/remote routing on the server
     |-- edge.rs                screen-edge geometry and cursor tracking (platform independent, unit-tested)

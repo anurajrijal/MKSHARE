@@ -47,6 +47,10 @@ struct Config {
     edge_side: String,
     /// Share copied text between the two computers
     share_clipboard: bool,
+    /// Windows: closing the window keeps MKShare running in the tray
+    tray_close: bool,
+    /// Start sharing by itself when MKShare opens (uses the saved settings)
+    auto_connect: bool,
     /// Client: name of the server picked from the list (lets the client find it again if its IP changes)
     server_name: String,
     /// The address `server_name` belongs to
@@ -65,6 +69,8 @@ impl Default for Config {
             edge_enabled: false,
             edge_side: "right".into(),
             share_clipboard: true,
+            tray_close: true,
+            auto_connect: false,
             server_name: String::new(),
             named_host: String::new(),
         }
@@ -190,6 +196,7 @@ fn spawn_reader<R: Read + Send + 'static>(r: R, shared: Arc<Mutex<Shared>>, ctx:
             let mut s = shared.lock().unwrap();
             if let Some(st) = parse_status(&line) {
                 s.status = st;
+                crate::tray::set_tooltip(&format!("MKShare - {}", short_status(st).0));
             }
             s.log.push(line);
             if s.log.len() > 300 {
@@ -223,6 +230,12 @@ struct App {
     scanned_once: bool,
     page: Page,
     logo: egui::TextureHandle,
+    /// The tray icon is on screen (Windows)
+    tray_ok: bool,
+    autostart_on: bool,
+    startup_error: Option<String>,
+    /// started by "start on login": hide the window once its first frame exists (Windows)
+    hide_first_frame: bool,
 }
 
 impl App {
@@ -243,15 +256,25 @@ impl App {
         });
     }
 
-    fn new(ctx: &egui::Context) -> Self {
+    fn new(ctx: &egui::Context, tray_ok: bool, background: bool) -> Self {
         let cfg = load_config();
+        if background && cfg!(windows) && !tray_ok {
+            // started hidden, but there is no tray icon to open it from: show the window
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        } else if background && !cfg!(windows) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        }
         let running_mode = cfg.mode;
         crate::update::cleanup_old();
         let logo = match eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")) {
             Ok(i) => egui::ColorImage::from_rgba_unmultiplied([i.width as usize, i.height as usize], &i.rgba),
             Err(_) => egui::ColorImage::example(),
         };
-        App {
+        let mut app = App {
+            tray_ok,
+            autostart_on: crate::autostart::is_enabled(),
+            startup_error: None,
+            hide_first_frame: background && tray_ok && cfg!(windows),
             page: Page::Home,
             logo: ctx.load_texture("logo", logo, egui::TextureOptions::LINEAR),
             hk: Hotkey::parse(&cfg.hotkey).unwrap_or(Hotkey::DEFAULT),
@@ -267,7 +290,11 @@ impl App {
             shared: Arc::new(Mutex::new(Shared { log: vec![], status: Status::Stopped })),
             my_ip: local_ip(),
             running_mode,
+        };
+        if app.cfg.auto_connect {
+            app.start(ctx);
         }
+        app
     }
 
     fn start(&mut self, ctx: &egui::Context) {
@@ -360,6 +387,7 @@ impl App {
         }
         self.stdin = None;
         self.shared.lock().unwrap().status = Status::Stopped;
+        crate::tray::set_tooltip("MKShare - Ready");
     }
 
     fn poll_child(&mut self) {
@@ -370,6 +398,7 @@ impl App {
             let mut s = self.shared.lock().unwrap();
             s.log.push(format!("Stopped ({code})"));
             s.status = Status::Stopped;
+            crate::tray::set_tooltip("MKShare - Ready");
             if !code.success() {
                 self.error = Some(
                     s.log
@@ -426,6 +455,7 @@ impl Drop for App {
         save_config(&self.cfg);
         persist_secret(&self.cfg);
         self.stop();
+        crate::tray::remove();
     }
 }
 
@@ -993,6 +1023,32 @@ impl App {
         });
 
         card(ui, false, |ui| {
+            section_title(ui, "▶", "Startup");
+            let before = self.autostart_on;
+            check(ui, &mut self.autostart_on, "Start MKShare when I sign in");
+            if self.autostart_on != before {
+                match crate::autostart::set(self.autostart_on) {
+                    Ok(()) => self.startup_error = None,
+                    Err(e) => {
+                        self.autostart_on = before;
+                        self.startup_error = Some(e);
+                    }
+                }
+            }
+            check(ui, &mut self.cfg.auto_connect, "Connect automatically when MKShare opens");
+            ui.label(RichText::new("Uses your saved settings. Turn on \"Remember passphrase\" on the Home page so it can connect without asking.").size(12.0).color(DIM));
+            if crate::tray::AVAILABLE {
+                check(ui, &mut self.cfg.tray_close, "Keep MKShare running in the tray when I close the window");
+                ui.label(RichText::new("The tray icon (near the clock) opens the window again; right-click it and choose Quit to exit completely.").size(12.0).color(DIM));
+            } else {
+                ui.label(RichText::new("On Linux there is no tray icon: closing the window quits MKShare. With start on login it opens minimized.").size(12.0).color(DIM));
+            }
+            if let Some(e) = &self.startup_error {
+                ui.colored_label(RED, e);
+            }
+        });
+
+        card(ui, false, |ui| {
             section_title(ui, "🔄", "Updates");
             let up = self.update.lock().unwrap().clone();
             let busy = matches!(up, Up::Checking | Up::Installing);
@@ -1045,6 +1101,15 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.hide_first_frame {
+            self.hide_first_frame = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        // Closing the window hides it in the tray (Windows) so sharing keeps running.
+        if ctx.input(|i| i.viewport().close_requested()) && self.tray_ok && self.cfg.tray_close && !crate::tray::is_quitting() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
         self.poll_child();
         ctx.request_repaint_after(Duration::from_millis(500));
         let (status, log) = {
@@ -1083,13 +1148,19 @@ impl eframe::App for App {
     }
 }
 
-pub fn run() -> anyhow::Result<()> {
+pub fn run(background: bool) -> anyhow::Result<()> {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).ok();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("MKShare")
         .with_app_id("mkshare")
         .with_inner_size([920.0, 800.0])
         .with_min_inner_size([760.0, 560.0]);
+    if background {
+        // started by "start on login": Windows hides the window (the tray icon opens it), Linux minimizes it
+        if cfg!(windows) {
+            viewport = viewport.with_visible(false);
+        }
+    }
     if let Some(i) = icon {
         viewport = viewport.with_icon(Arc::new(i));
     }
@@ -1099,7 +1170,8 @@ pub fn run() -> anyhow::Result<()> {
         options,
         Box::new(|cc| {
             theme(&cc.egui_ctx);
-            Ok(Box::new(App::new(&cc.egui_ctx)))
+            let tray_ok = crate::tray::spawn(cc.egui_ctx.clone());
+            Ok(Box::new(App::new(&cc.egui_ctx, tray_ok, background)))
         }),
     )
         .map_err(|e| anyhow::anyhow!("cannot open window: {e}"))
