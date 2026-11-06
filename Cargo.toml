@@ -1,6 +1,6 @@
 [package]
 name = "mkshare"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 license = "MIT"
 description = "Share one keyboard and mouse between Windows and Linux machines over the network"
@@ -49,7 +49,7 @@ extended-description = "Share one keyboard and mouse between Windows and Linux m
 assets = [
     ["target/release/mkshare", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/mkshare/README", "644"],
-    ["packaging/99-mkshare.rules", "lib/udev/rules.d/99-mkshare.rules", "644"],
+    ["packaging/60-mkshare.rules", "lib/udev/rules.d/60-mkshare.rules", "644"],
     ["packaging/mkshare-modules.conf", "etc/modules-load.d/mkshare.conf", "644"],
     ["packaging/mkshare.desktop", "usr/share/applications/mkshare.desktop", "644"],
     ["assets/icon.png", "usr/share/icons/hicolor/256x256/apps/mkshare.png", "644"],

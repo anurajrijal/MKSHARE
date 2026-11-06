@@ -10,6 +10,8 @@ mod net;
 mod platform;
 mod proto;
 mod secret;
+#[cfg(target_os = "linux")]
+mod setup;
 mod tray;
 mod update;
 
@@ -36,6 +38,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Linux, run as root: let the user logged in at this computer use the input devices
+    /// (the app's "Fix permissions" button runs this).
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    SetupLinux,
     /// Run on the machine that has the physical keyboard and mouse.
     /// Press the switch shortcut (default Ctrl+Alt+K) to switch input between this machine and the client.
     Server {
@@ -87,6 +94,8 @@ fn main() -> Result<()> {
             #[cfg(windows)]
             attach_console();
             match cmd {
+                #[cfg(target_os = "linux")]
+                Cmd::SetupLinux => setup::run().map_err(|e| anyhow!("{e:#}")),
                 Cmd::Server { port, pass, hotkey, edge, no_clipboard, stdin_control } => {
                     let hotkey = Hotkey::parse(&hotkey).map_err(|e| anyhow!("Error: invalid --hotkey: {e}"))?;
                     let edge = match edge.as_deref() {

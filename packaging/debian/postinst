@@ -1,11 +1,9 @@
 #!/bin/sh
 set -e
 if [ "$1" = "configure" ]; then
-    # make /dev/uinput exist now and apply the udev rule (group "input") without a reboot
+    # make /dev/uinput exist now and apply the udev rule (access for the logged-in user) without a reboot
     modprobe uinput 2>/dev/null || true
     udevadm control --reload 2>/dev/null || true
-    udevadm trigger --sysname-match=uinput 2>/dev/null || true
-    echo "MKShare: to let it create virtual input devices, add your user to the 'input' group:"
-    echo "    sudo usermod -aG input \$USER      (then log out and back in)"
+    udevadm trigger --subsystem-match=input --subsystem-match=misc 2>/dev/null || true
 fi
 exit 0

@@ -124,11 +124,10 @@ Run `mkshare.exe`. It is a standalone program and needs no installer.
 ### Debian / Ubuntu (22.04 or newer, 64-bit Intel/AMD)
 
 ```bash
-sudo apt install ./mkshare_0.3.1-1_amd64.deb
-sudo usermod -aG input $USER      # then log out and back in
+sudo apt install ./mkshare_0.3.2-1_amd64.deb
 ```
 
-This installs the program, an **MKShare** entry in your application menu, and a udev rule that lets members of the `input` group create virtual input devices. Start it from the menu or by running `mkshare`.
+This installs the program, an **MKShare** entry in your application menu, and a udev rule that gives the person logged in at the computer access to the input devices (no group changes, no logging out). Start it from the menu or by running `mkshare`. See [Linux permissions](#linux-permissions).
 
 ### Other Linux distributions
 
@@ -205,7 +204,7 @@ Click **Update application** at the bottom of the window. MKShare checks the lat
 **Publishing a release** (maintainers): set `version` in `Cargo.toml`, commit and push, then push a matching tag:
 
 ```bash
-git tag v0.3.1 && git push origin v0.3.0
+git tag v0.3.2 && git push origin v0.3.2
 ```
 
 `.github/workflows/release.yml` builds the Windows `.exe`, the Linux binary and the `.deb`, and attaches them to the release together with `SHA256SUMS.txt`.
@@ -239,28 +238,24 @@ On Windows the executable is built as a GUI program. In a terminal, output may a
 
 ## Linux permissions
 
-On Linux MKShare reads `/dev/input/event*` (server) and writes `/dev/uinput` (client and server passthrough). The `.deb` package installs the udev rule, loads the `uinput` kernel module (now and at every boot) and depends on `curl` (used by **Update application**). It cannot add *you* to the `input` group, so run this once and then log out and back in:
+On Linux MKShare reads `/dev/input/event*` (server) and writes `/dev/uinput` (client and server passthrough). **You do not need to add yourself to any group**: a udev rule tagged `uaccess` gives the person who is logged in at the computer access to these devices (the same mechanism Steam uses for game controllers), with no logging out and in.
 
-```bash
-sudo usermod -aG input $USER
-```
+- **`.deb` package**: installs the rule, loads the `uinput` kernel module now and at every boot, and applies the rule immediately. It also depends on `curl` (used by **Update application**). Nothing else to do.
+- **Standalone binary**: if MKShare reports a permission problem, click **Fix permissions** in the app. It asks for your password once (graphical prompt) and installs the same rule. Or do it from a terminal: `sudo ./mkshare-linux-x86_64 setup-linux`.
+- **No desktop session at the machine** (for example over SSH): `uaccess` only applies to the user sitting at the computer. Use the `input` group instead: `sudo usermod -aG input $USER`, then log out and in (the rule also gives the `input` group access to `/dev/uinput`).
 
-If you use the standalone binary instead, or the error `cannot open /dev/uinput` still appears, do it by hand:
+To do it completely by hand, copy `packaging/60-mkshare.rules` to `/etc/udev/rules.d/`, then:
 
 ```bash
 sudo apt install curl            # needed by "Update application"
 sudo modprobe uinput             # create /dev/uinput
 echo uinput | sudo tee /etc/modules-load.d/mkshare.conf   # load it at every boot
-sudo usermod -aG input $USER
-echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \
-  | sudo tee /etc/udev/rules.d/99-mkshare.rules
-sudo udevadm control --reload && sudo udevadm trigger
-# log out and back in
+sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=input --subsystem-match=misc
 ```
 
 For a quick test you can instead start MKShare with `sudo`.
 
-> Membership of the `input` group lets a program read every keystroke on the machine. Only add users you trust.
+> Access to the input devices lets a program run by that user read every keystroke on the machine. That is inherent to sharing a keyboard; only run MKShare builds you trust.
 
 ## Security
 
@@ -344,12 +339,15 @@ MKSHARE/
 |   |-- icon.png               window and Linux app icon
 |   `-- icon.ico               Windows executable icon
 |-- packaging/
-|   |-- 99-mkshare.rules       udev rule (access to /dev/uinput for the input group)
+|   |-- 60-mkshare.rules       udev rule (uaccess: logged-in user may use the input devices)
+|   |-- mkshare-modules.conf   loads the uinput kernel module at boot
+|   |-- debian/postinst        .deb post-install: load uinput, apply the udev rule
 |   `-- mkshare.desktop        Linux application-menu entry
 `-- src/
     |-- main.rs                entry point: no arguments = GUI; "server" / "client" = headless
     |-- gui.rs                 desktop window (egui): settings, status, buttons, log
     |-- autostart.rs           start on login (Windows Run key / Linux autostart file)
+    |-- setup.rs               Linux "setup-linux" command / Fix permissions button (installs the udev rule)
     |-- tray.rs                Windows tray icon (open, quit, status tooltip); no-op on Linux
     |-- clipboard.rs           clipboard text sharing (background thread that watches and sets the clipboard)
     |-- core.rs                switch shortcut, edge detection and local/remote routing on the server

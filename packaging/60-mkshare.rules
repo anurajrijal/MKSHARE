@@ -1,0 +1,10 @@
+# MKShare: give the person sitting at this computer access to the input devices.
+# The "uaccess" tag makes systemd-logind grant access to the user who is logged in
+# at the machine - no group membership and no logging out and in are needed.
+# (The "input" group keeps working as a fallback, e.g. for SSH or headless use.)
+
+# Server: read (and grab) the physical keyboards and mice
+SUBSYSTEM=="input", KERNEL=="event[0-9]*", TAG+="uaccess"
+
+# Client (and server pass-through): create virtual input devices
+KERNEL=="uinput", SUBSYSTEM=="misc", OPTIONS+="static_node=uinput", TAG+="uaccess", GROUP="input", MODE="0660"

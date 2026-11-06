@@ -95,6 +95,15 @@ enum Up {
     Error(String),
 }
 
+/// State of the Linux "Fix permissions" button.
+#[derive(Clone)]
+enum PermFix {
+    Idle,
+    Running,
+    Done,
+    Failed(String),
+}
+
 fn config_path() -> Option<PathBuf> {
     Some(crate::secret::config_dir()?.join("config.json"))
 }
@@ -234,6 +243,7 @@ struct App {
     tray_ok: bool,
     autostart_on: bool,
     startup_error: Option<String>,
+    perm_fix: Arc<Mutex<PermFix>>,
     /// started by "start on login": hide the window once its first frame exists (Windows)
     hide_first_frame: bool,
 }
@@ -274,6 +284,7 @@ impl App {
             tray_ok,
             autostart_on: crate::autostart::is_enabled(),
             startup_error: None,
+            perm_fix: Arc::new(Mutex::new(PermFix::Idle)),
             hide_first_frame: background && tray_ok && cfg!(windows),
             page: Page::Home,
             logo: ctx.load_texture("logo", logo, egui::TextureOptions::LINEAR),
@@ -438,6 +449,33 @@ impl App {
                 Ok(crate::update::Outcome::Installed(msg)) => *state.lock().unwrap() = Up::Done(msg),
                 Err(e) => *state.lock().unwrap() = Up::Error(format!("{e:#}")),
             }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Linux: installs the udev rule that lets the logged-in user use the input devices.
+    /// Needs administrator rights, asked for with the system's graphical password prompt (pkexec).
+    fn fix_permissions(&mut self, ctx: &egui::Context) {
+        *self.perm_fix.lock().unwrap() = PermFix::Running;
+        let (state, ctx) = (self.perm_fix.clone(), ctx.clone());
+        thread::spawn(move || {
+            let result = std::env::current_exe().map_err(|e| e.to_string()).and_then(|exe| {
+                let out = Command::new("pkexec")
+                    .arg(exe)
+                    .arg("setup-linux")
+                    .output()
+                    .map_err(|e| format!("could not run pkexec (it needs a graphical password prompt): {e}"))?;
+                if out.status.success() {
+                    Ok(())
+                } else {
+                    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    Err(if err.is_empty() { "cancelled, or the password was not accepted".to_string() } else { err })
+                }
+            });
+            *state.lock().unwrap() = match result {
+                Ok(()) => PermFix::Done,
+                Err(e) => PermFix::Failed(e),
+            };
             ctx.request_repaint();
         });
     }
@@ -869,7 +907,31 @@ impl App {
         }
         let log_text = log.join("\n");
         if cfg!(target_os = "linux") && (log_text.contains("input' group") || log_text.contains("uinput")) {
-            ui.colored_label(AMBER, "Permission needed: run  sudo modprobe uinput  and  sudo usermod -aG input $USER  then log out and in (or reboot), or start MKShare with sudo.");
+            ui.colored_label(AMBER, "MKShare needs permission to read and create input devices on this computer.");
+            let pf = self.perm_fix.lock().unwrap().clone();
+            match &pf {
+                PermFix::Running => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Waiting for the password prompt...");
+                    });
+                }
+                PermFix::Done => {
+                    ui.colored_label(GREEN, "Permissions fixed. Press Start again.");
+                }
+                PermFix::Failed(e) => {
+                    ui.colored_label(RED, e);
+                }
+                PermFix::Idle => {}
+            }
+            if !matches!(pf, PermFix::Running) && secondary_button(ui, "Fix permissions (asks for your password once)") {
+                self.fix_permissions(ctx);
+            }
+            ui.label(
+                RichText::new("Or in a terminal: sudo modprobe uinput && sudo usermod -aG input $USER, then log out and in.")
+                    .size(12.0)
+                    .color(DIM),
+            );
         }
 
         // ---- start / stop
