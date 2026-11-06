@@ -19,7 +19,7 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
@@ -244,6 +244,9 @@ struct App {
     autostart_on: bool,
     startup_error: Option<String>,
     perm_fix: Arc<Mutex<PermFix>>,
+    /// when the window opened (drives the intro animation)
+    started: Instant,
+    splash_skip: bool,
     /// started by "start on login": hide the window once its first frame exists (Windows)
     hide_first_frame: bool,
 }
@@ -285,6 +288,9 @@ impl App {
             autostart_on: crate::autostart::is_enabled(),
             startup_error: None,
             perm_fix: Arc::new(Mutex::new(PermFix::Idle)),
+            // no intro when started hidden at login: pretend it ran long ago
+            started: if background { Instant::now().checked_sub(Duration::from_secs(3600)).unwrap_or_else(Instant::now) } else { Instant::now() },
+            splash_skip: false,
             hide_first_frame: background && tray_ok && cfg!(windows),
             page: Page::Home,
             logo: ctx.load_texture("logo", logo, egui::TextureOptions::LINEAR),
@@ -1224,8 +1230,121 @@ impl App {
                     });
                 }
             });
+
+        // intro animation on top of everything for the first moments after opening
+        let t = self.started.elapsed().as_secs_f32();
+        if t < SPLASH_TOTAL && !self.splash_skip {
+            self.splash(ctx, t);
+            ctx.request_repaint();
+        }
+    }
+
+    /// The animated intro: glow and ripples around the logo, name, tagline and a loading bar,
+    /// then it fades away. A click skips it.
+    fn splash(&mut self, ctx: &egui::Context, t: f32) {
+        let ease_out_back = |x: f32| {
+            let (c1, c3) = (1.70158_f32, 2.70158_f32);
+            1.0 + c3 * (x - 1.0).powi(3) + c1 * (x - 1.0).powi(2)
+        };
+        let smooth = |x: f32| {
+            let x = x.clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        };
+        let span = |from: f32, to: f32| ((t - from) / (to - from)).clamp(0.0, 1.0);
+
+        let master = 1.0 - span(SPLASH_TOTAL - 0.5, SPLASH_TOTAL); // fade out at the end
+        let logo_a = smooth(span(0.0, 0.5));
+        let title_a = smooth(span(0.45, 0.95));
+        let tag_a = smooth(span(0.8, 1.3));
+        let progress = smooth(span(0.4, SPLASH_TOTAL - 0.6));
+        // the content (logo, text, bar) is gone by the middle of the fade; only the background keeps dissolving
+        let content = (master * 2.0 - 1.0).clamp(0.0, 1.0);
+        let a = |c: Color32, k: f32| c.gamma_multiply((k * content).clamp(0.0, 1.0));
+
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("splash"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let (rect, resp) = ui.allocate_exact_size(screen.size(), egui::Sense::click());
+                if resp.clicked() {
+                    self.splash_skip = true;
+                }
+                let p = ui.painter_at(rect);
+                p.rect_filled(rect, 0.0, BG.gamma_multiply(master));
+                let c = rect.center() + egui::vec2(0.0, -40.0);
+
+                // soft glow
+                for i in 0..7 {
+                    let r = 80.0 + i as f32 * 24.0;
+                    p.circle_filled(c, r, a(ACCENT, 0.07 * (1.0 - i as f32 / 7.0) * logo_a));
+                }
+                // ripples that expand from the logo
+                if t > 0.4 {
+                    for k in 0..2 {
+                        let phase = ((t - 0.4) * 0.8 + k as f32 * 0.5) % 1.0;
+                        p.circle_stroke(c, 70.0 + phase * 170.0, egui::Stroke::new(2.0_f32, a(ACCENT2, (1.0 - phase) * 0.55)));
+                    }
+                }
+                // logo: grows in with a small overshoot
+                let size = 132.0 * (0.55 + 0.45 * ease_out_back(span(0.0, 0.7)));
+                let logo = egui::Rect::from_center_size(c, egui::vec2(size, size));
+                p.image(
+                    self.logo.id(),
+                    logo,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::from_white_alpha((255.0 * logo_a * content) as u8),
+                );
+                // name and tagline
+                let slide = (1.0 - title_a) * 14.0;
+                p.text(
+                    c + egui::vec2(0.0, 112.0 + slide),
+                    egui::Align2::CENTER_CENTER,
+                    "MKShare",
+                    egui::FontId::proportional(42.0),
+                    a(Color32::WHITE, title_a),
+                );
+                p.text(
+                    c + egui::vec2(0.0, 156.0),
+                    egui::Align2::CENTER_CENTER,
+                    "Share. Control. Together.",
+                    egui::FontId::proportional(17.0),
+                    a(DIM, tag_a),
+                );
+                // loading bar
+                let bar = egui::Rect::from_center_size(c + egui::vec2(0.0, 212.0), egui::vec2(260.0, 6.0));
+                p.rect_filled(bar, egui::CornerRadius::same(3), a(Color32::from_rgb(34, 39, 70), tag_a));
+                if progress > 0.01 {
+                    let fill = egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * progress, bar.height()));
+                    gradient_rect(&p, fill, 3.0, a(Color32::from_rgb(88, 70, 245), 1.0), a(ACCENT2, 1.0));
+                }
+                let stage = if progress < 0.35 {
+                    "Starting..."
+                } else if progress < 0.8 {
+                    "Getting ready..."
+                } else {
+                    "Ready"
+                };
+                p.text(
+                    c + egui::vec2(0.0, 238.0),
+                    egui::Align2::CENTER_CENTER,
+                    stage,
+                    egui::FontId::proportional(13.0),
+                    a(DIM, tag_a),
+                );
+                p.text(
+                    rect.center_bottom() + egui::vec2(0.0, -22.0),
+                    egui::Align2::CENTER_CENTER,
+                    format!("v{}", crate::update::CURRENT),
+                    egui::FontId::proportional(12.0),
+                    a(DIM, tag_a * 0.8),
+                );
+            });
     }
 }
+
+/// Length of the intro animation in seconds.
+const SPLASH_TOTAL: f32 = 2.4;
 
 pub fn run(background: bool) -> anyhow::Result<()> {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).ok();
@@ -1279,6 +1398,7 @@ mod ui_tests {
             app.cfg = Config::default();
             app.cfg.mode = Mode::Client;
             app.scanned_once = true;
+            app.splash_skip = true; // tests drive the real UI: no intro on top of it
             Harness { ctx, app, time: 0.0 }
         }
 

@@ -28,7 +28,7 @@ MKShare is a small, fast desktop app written in Rust. It runs on **Windows** and
 
 ## Features
 
-- **Graphical app**: pick Server or Client, enter a passphrase, press Start.
+- **Graphical app**: an animated intro when it opens (click to skip), then pick Server or Client, enter a passphrase, press Start.
 - **Finds the server for you**: the client lists MKShare servers on your network, so you do not type an IP address (and it re-finds the server by name if its IP changes).
 - **Screen-edge switching** (optional): move the mouse off the edge of the screen to cross to the other computer, and push against the opposite edge to come back. You choose which side the other computer is on, and you can turn it off.
 - **Your own shortcut**: switch with a keyboard shortcut you choose (default `Ctrl+Alt+K`).
@@ -124,7 +124,7 @@ Run `mkshare.exe`. It is a standalone program and needs no installer.
 ### Debian / Ubuntu (22.04 or newer, 64-bit Intel/AMD)
 
 ```bash
-sudo apt install ./mkshare_0.3.3-1_amd64.deb
+sudo apt install ./mkshare_0.3.4-1_amd64.deb
 ```
 
 This installs the program, an **MKShare** entry in your application menu, and a udev rule that gives the person logged in at the computer access to the input devices (no group changes, no logging out). Start it from the menu or by running `mkshare`. See [Linux permissions](#linux-permissions).
@@ -138,7 +138,7 @@ Use the standalone `mkshare-linux-x86_64` binary (needs glibc 2.31 or newer) and
 | Field | Meaning |
 |---|---|
 | **Server / Client** | Server = the computer the keyboard and mouse are plugged into. Client = the computer that receives them. |
-| **Server address** (client only) | IP address or hostname of the server. Use **Find servers** to pick it from a list instead. |
+| **Server address** (client only) | IP address or hostname of the server. Use **Find servers** to pick it from a list instead: each computer is listed once, with the address your computer can reach (not a virtual adapter such as WSL or Hyper-V), and the one you click is highlighted. |
 | **Port** | TCP port. Default `24800`. Must match on both sides. |
 | **Passphrase** | Shared secret. Must match on both sides. |
 
@@ -204,7 +204,7 @@ Click **Update application** at the bottom of the window. MKShare checks the lat
 **Publishing a release** (maintainers): set `version` in `Cargo.toml`, commit and push, then push a matching tag:
 
 ```bash
-git tag v0.3.3 && git push origin v0.3.3
+git tag v0.3.4 && git push origin v0.3.4
 ```
 
 `.github/workflows/release.yml` builds the Windows `.exe`, the Linux binary and the `.deb`, and attaches them to the release together with `SHA256SUMS.txt`.
