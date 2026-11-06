@@ -1,6 +1,6 @@
 [package]
 name = "mkshare"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 license = "MIT"
 description = "Share one keyboard and mouse between Windows and Linux machines over the network"
@@ -42,13 +42,15 @@ winresource = "0.1"
 maintainer = "mkshare <noreply@example.com>"
 section = "utils"
 priority = "optional"
-depends = "$auto, libgl1, libegl1, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libxcursor1, libxi6, libxrandr2, libwayland-client0"
+depends = "$auto, libgl1, libegl1, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libxcursor1, libxi6, libxrandr2, libwayland-client0, curl"
+maintainer-scripts = "packaging/debian"
 recommends = "libsecret-tools"
 extended-description = "Share one keyboard and mouse between Windows and Linux machines over an encrypted network connection. Includes a graphical app (MKShare) and a command line mode."
 assets = [
     ["target/release/mkshare", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/mkshare/README", "644"],
     ["packaging/99-mkshare.rules", "lib/udev/rules.d/99-mkshare.rules", "644"],
+    ["packaging/mkshare-modules.conf", "etc/modules-load.d/mkshare.conf", "644"],
     ["packaging/mkshare.desktop", "usr/share/applications/mkshare.desktop", "644"],
     ["assets/icon.png", "usr/share/icons/hicolor/256x256/apps/mkshare.png", "644"],
 ]

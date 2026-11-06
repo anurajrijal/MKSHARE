@@ -124,7 +124,7 @@ Run `mkshare.exe`. It is a standalone program and needs no installer.
 ### Debian / Ubuntu (22.04 or newer, 64-bit Intel/AMD)
 
 ```bash
-sudo apt install ./mkshare_0.3.0-1_amd64.deb
+sudo apt install ./mkshare_0.3.1-1_amd64.deb
 sudo usermod -aG input $USER      # then log out and back in
 ```
 
@@ -205,7 +205,7 @@ Click **Update application** at the bottom of the window. MKShare checks the lat
 **Publishing a release** (maintainers): set `version` in `Cargo.toml`, commit and push, then push a matching tag:
 
 ```bash
-git tag v0.3.0 && git push origin v0.3.0
+git tag v0.3.1 && git push origin v0.3.0
 ```
 
 `.github/workflows/release.yml` builds the Windows `.exe`, the Linux binary and the `.deb`, and attaches them to the release together with `SHA256SUMS.txt`.
@@ -239,9 +239,18 @@ On Windows the executable is built as a GUI program. In a terminal, output may a
 
 ## Linux permissions
 
-On Linux MKShare reads `/dev/input/event*` (server) and writes `/dev/uinput` (client and server passthrough). The `.deb` package installs the udev rule for you. To do it by hand:
+On Linux MKShare reads `/dev/input/event*` (server) and writes `/dev/uinput` (client and server passthrough). The `.deb` package installs the udev rule, loads the `uinput` kernel module (now and at every boot) and depends on `curl` (used by **Update application**). It cannot add *you* to the `input` group, so run this once and then log out and back in:
 
 ```bash
+sudo usermod -aG input $USER
+```
+
+If you use the standalone binary instead, or the error `cannot open /dev/uinput` still appears, do it by hand:
+
+```bash
+sudo apt install curl            # needed by "Update application"
+sudo modprobe uinput             # create /dev/uinput
+echo uinput | sudo tee /etc/modules-load.d/mkshare.conf   # load it at every boot
 sudo usermod -aG input $USER
 echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \
   | sudo tee /etc/udev/rules.d/99-mkshare.rules

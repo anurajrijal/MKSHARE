@@ -869,7 +869,7 @@ impl App {
         }
         let log_text = log.join("\n");
         if cfg!(target_os = "linux") && (log_text.contains("input' group") || log_text.contains("uinput")) {
-            ui.colored_label(AMBER, "Permission needed: run  sudo usermod -aG input $USER  then log out and in, or start MKShare with sudo.");
+            ui.colored_label(AMBER, "Permission needed: run  sudo modprobe uinput  and  sudo usermod -aG input $USER  then log out and in (or reboot), or start MKShare with sudo.");
         }
 
         // ---- start / stop

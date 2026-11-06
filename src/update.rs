@@ -57,7 +57,7 @@ fn fetch(url: &str) -> Result<Vec<u8>> {
     let out = curl()
         .args(["-H", "Accept: application/vnd.github+json", url])
         .output()
-        .context("could not run curl (is it installed?)")?;
+        .context("could not run curl - it is not installed (Debian/Ubuntu: sudo apt install curl)")?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         bail!("download failed: {}", err.trim());
@@ -138,7 +138,7 @@ fn download(rel: &Release) -> Result<PathBuf> {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir)?;
     let dest = dir.join(&rel.asset_name);
-    let st = curl().arg("-o").arg(&dest).arg(&rel.asset_url).output().context("could not run curl")?;
+    let st = curl().arg("-o").arg(&dest).arg(&rel.asset_url).output().context("could not run curl - it is not installed (Debian/Ubuntu: sudo apt install curl)")?;
     if !st.status.success() {
         bail!("download failed: {}", String::from_utf8_lossy(&st.stderr).trim());
     }

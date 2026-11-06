@@ -297,7 +297,7 @@ impl Injector {
             axes.insert(a);
         }
         let dev = VirtualDeviceBuilder::new()
-            .context("cannot open /dev/uinput (run as root or fix permissions, see README)")?
+            .context("cannot open /dev/uinput: run 'sudo modprobe uinput' and add yourself to the 'input' group (sudo usermod -aG input $USER, then log out and in), or start with sudo - see README")?
             .name("mkshare virtual input")
             .with_keys(&keys)?
             .with_relative_axes(&axes)?
