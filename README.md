@@ -32,8 +32,10 @@ MKShare is a small, fast desktop app written in Rust. It runs on **Windows** and
 - **Finds the server for you**: the client lists MKShare servers on your network, so you do not type an IP address (and it re-finds the server by name if its IP changes).
 - **Screen-edge switching** (optional): move the mouse off the edge of the screen to cross to the other computer, and push against the opposite edge to come back. You choose which side the other computer is on, and you can turn it off.
 - **Your own shortcut**: switch with a keyboard shortcut you choose (default `Ctrl+Alt+K`).
+- **Several computers at once**: connect more than one client to the same server and jump between them with `Ctrl+Alt+1`, `Ctrl+Alt+2`, ... or with the **Use this computer** buttons.
 - **Switch from either computer**: a button on the server, a button on the client, the shortcut, or the screen edge.
-- **Shared clipboard**: copy text on one computer and paste it on the other (text only, up to 32 KB; you can turn it off).
+- **Shared clipboard**: copy text, an image or files on one computer and paste on the other (you can turn it off, or turn off images / files separately).
+- **Drag and drop files**: drop files on the MKShare window to send them to the other computer(s); they land in its `Downloads/MKShare` folder.
 - **Runs in the background**: on Windows, closing the window keeps MKShare in the system tray; optionally it starts when you sign in and connects by itself.
 - **Built-in updates**: an **Update application** button installs new releases from GitHub.
 - **Cross-platform**: Windows 10/11 and Linux (Debian/Ubuntu `.deb` provided).
@@ -100,7 +102,7 @@ The window starts the real server or client as a background process, so **Stop**
 
 Both computers must be on the same network, and the server's TCP port (default `24800`) and UDP port `24801` (for finding servers) must be reachable.
 
-**Both computers must run the same version** of MKShare: version 0.3 added new messages that older versions do not understand.
+**Both computers must run the same version** of MKShare: versions 0.3 and 0.4 added new messages that older versions do not understand.
 
 ## Installation
 
@@ -124,7 +126,7 @@ Run `mkshare.exe`. It is a standalone program and needs no installer.
 ### Debian / Ubuntu (22.04 or newer, 64-bit Intel/AMD)
 
 ```bash
-sudo apt install ./mkshare_0.3.4-1_amd64.deb
+sudo apt install ./mkshare_0.4.0-1_amd64.deb
 ```
 
 This installs the program, an **MKShare** entry in your application menu, and a udev rule that gives the person logged in at the computer access to the input devices (no group changes, no logging out). Start it from the menu or by running `mkshare`. See [Linux permissions](#linux-permissions).
@@ -169,6 +171,15 @@ You can switch from either computer:
 
 **Changing the shortcut** (server, while stopped): under **Switching**, tick the modifiers you want (Ctrl, Alt, Shift, Win) and pick the key from the list. A shortcut needs at least one modifier, unless it is an F-key, Pause or ScrollLock, so it cannot fire while you type. It is saved and used the next time you press **Start**.
 
+**Several computers.** Any number of clients can connect to the same server (start MKShare as Client on each one, with the same passphrase). While the server is running, the Home page lists every connected computer with a **Use this computer** button, plus **Back to this computer**. On the keyboard:
+
+| Shortcut | What it does |
+|---|---|
+| `Ctrl+Alt+K` (your switch shortcut) | Between this computer and the computer you used last |
+| `Ctrl+Alt+1` ... `Ctrl+Alt+9` | Straight to the computer with that number (your shortcut's modifiers plus a digit) |
+
+Each computer gets its number the first time it connects, shown next to its name, and the server remembers it, so the number is the same after reconnecting or restarting (computers are told apart by their name). Two computers with the same name are shown as `NAME` and `NAME #2`. A client can also ask for the keyboard and mouse with its own button; if another computer has them at that moment, they move over to the client that asked. Text copied on any computer is shared with all the others. A computer that loses its connection while it has the keyboard and mouse hands them back to the server automatically.
+
 **Screen-edge switching** (server, off by default): tick **Also switch by moving the mouse to the screen edge** and choose which side the other computer is on (Left, Right, Top or Bottom). The cursor then crosses over when it reaches that edge and appears on the matching edge of the other screen at the same height. On the other computer, push the mouse against the opposite edge to come back. It does not trigger while a mouse button is held, so dragging is never interrupted. Untick the option to turn it off; the shortcut and buttons keep working either way.
 
 - Windows uses the real cursor position across all monitors.
@@ -176,7 +187,17 @@ You can switch from either computer:
 
 ### Clipboard
 
-With **Share the clipboard** ticked (the default, on both computers), text you copy on one computer can be pasted on the other, in both directions. Only text is shared (not images or files), up to 32 KB, and only text copied after MKShare started. Each computer has its own checkbox, so untick it on a computer to stop sending and receiving there. Anything you copy is sent to the other computer, so turn it off while copying passwords or other private text. The text travels over the same encrypted connection as the keyboard and mouse.
+With **Share the clipboard** ticked (the default, on both computers), what you copy on one computer can be pasted on the other, in both directions. Only things copied after MKShare started are sent. Each computer has its own checkboxes, so untick one on a computer to stop sending and receiving there:
+
+- **Text**: up to 32 KB.
+- **Also share copied images** (default on): screenshots and copied pictures, up to 48 MB, sent as PNG.
+- **Also share copied files** (default on): files copied in the file manager, up to 50 files and 256 MB at a time. They are saved in `Downloads/MKShare` on the other computer and put on its clipboard, so you can paste them there. Folders are not supported yet.
+
+Anything you copy is sent to the other computer(s), so turn this off while copying passwords or other private data. Everything travels over the same encrypted connection as the keyboard and mouse. Existing files are never overwritten (a number is added to the name).
+
+### Drag and drop files
+
+Drop files on the MKShare window (the **Files** card on the Home page) while sharing is running to send them without using the clipboard, up to 16 GB per file. On the server you can choose one computer or **All computers** as the target; a client sends to the server. Received files go to `Downloads/MKShare`, and the transfer list lets you open the folder. A transfer that loses its connection leaves no half-written file behind.
 
 On Linux, clipboard access needs a desktop session (X11, or a Wayland desktop that supports the data-control protocol such as KDE and Sway; GNOME on Wayland does not allow it). If the clipboard cannot be opened, MKShare logs a message and keeps sharing the keyboard and mouse.
 
@@ -204,7 +225,7 @@ Click **Update application** at the bottom of the window. MKShare checks the lat
 **Publishing a release** (maintainers): set `version` in `Cargo.toml`, commit and push, then push a matching tag:
 
 ```bash
-git tag v0.3.4 && git push origin v0.3.4
+git tag v0.4.0 && git push origin v0.4.0
 ```
 
 `.github/workflows/release.yml` builds the Windows `.exe`, the Linux binary and the `.deb`, and attaches them to the release together with `SHA256SUMS.txt`.
@@ -349,8 +370,10 @@ MKSHARE/
     |-- autostart.rs           start on login (Windows Run key / Linux autostart file)
     |-- setup.rs               Linux "setup-linux" command / Fix permissions button (installs the udev rule)
     |-- tray.rs                Windows tray icon (open, quit, status tooltip); no-op on Linux
-    |-- clipboard.rs           clipboard text sharing (background thread that watches and sets the clipboard)
-    |-- core.rs                switch shortcut, edge detection and local/remote routing on the server
+    |-- clipboard.rs           clipboard sharing: text, images and copied files (background thread)
+    |-- xfer.rs                chunked, acknowledged file transfer (safe names, size limits, no overwrite)
+    |-- core.rs                switch shortcuts, edge detection and local/remote routing on the server
+    |-- hub.rs                 the connected computers, their numbers 1-9 and who has the input (unit-tested)
     |-- edge.rs                screen-edge geometry and cursor tracking (platform independent, unit-tested)
     |-- discovery.rs           finds servers on the LAN (UDP broadcast query / reply)
     |-- net.rs                 encrypted, authenticated message framing over TCP
@@ -368,10 +391,10 @@ Local build output goes to `target/` and `dist/`; both are git-ignored.
 ## Limitations
 
 - Screen-edge switching on Linux is approximate (see above), and it supports one display there.
-- One client at a time.
+- Screen-edge switching leads to one computer: the one used last (it cannot send different edges to different computers yet).
 - Server discovery needs UDP broadcast, which some Wi-Fi networks block (typing the address always works).
 - Linux server mode shares keyboards and mice, not touchpads.
-- The clipboard shares plain text only (no images, files or formatted text). There is no file sharing.
+- The clipboard shares text, images and files, but not formatted (rich) text. Folders cannot be sent yet.
 - Pointer speed on the client follows that machine's own pointer settings.
 - The connection is not forward-secret and uses a pre-shared passphrase rather than certificates.
 

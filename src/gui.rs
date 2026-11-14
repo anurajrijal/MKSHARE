@@ -47,6 +47,9 @@ struct Config {
     edge_side: String,
     /// Share copied text between the two computers
     share_clipboard: bool,
+    /// ... including copied images and copied files
+    share_images: bool,
+    share_files: bool,
     /// Windows: closing the window keeps MKShare running in the tray
     tray_close: bool,
     /// Start sharing by itself when MKShare opens (uses the saved settings)
@@ -69,6 +72,8 @@ impl Default for Config {
             edge_enabled: false,
             edge_side: "right".into(),
             share_clipboard: true,
+            share_images: true,
+            share_files: true,
             tray_close: true,
             auto_connect: false,
             server_name: String::new(),
@@ -175,18 +180,19 @@ impl Status {
 }
 
 struct Shared {
+    /// computers connected to the server (the server prints them as `Clients: [...]`)
+    clients: Vec<crate::proto::ClientInfo>,
+    /// recent file and image transfers (the process prints them as `Xfer: {...}`)
+    transfers: Vec<crate::proto::XferInfo>,
     log: Vec<String>,
     status: Status,
 }
 
 fn parse_status(line: &str) -> Option<Status> {
+    // (the server's connected computers and who has the input come from the `Clients:` line instead)
     if line.starts_with("Listening on") {
         Some(Status::Waiting)
-    } else if line.starts_with("Client connected") || line.starts_with("Input -> LOCAL") {
-        Some(Status::Connected)
-    } else if line.starts_with("Client disconnected") {
-        Some(Status::Waiting)
-    } else if line.starts_with("Input -> REMOTE") || line.starts_with("Active: on") {
+    } else if line.starts_with("Active: on") {
         Some(Status::Remote)
     } else if line.starts_with("Active: off") {
         Some(Status::Connected)
@@ -199,10 +205,59 @@ fn parse_status(line: &str) -> Option<Status> {
     }
 }
 
+/// The server's status, from the computers connected to it.
+fn status_from_clients(clients: &[crate::proto::ClientInfo]) -> Status {
+    if clients.iter().any(|c| c.active) {
+        Status::Remote
+    } else if clients.is_empty() {
+        Status::Waiting
+    } else {
+        Status::Connected
+    }
+}
+
+/// Handles the server's `Clients: [...]` line. Returns false if the line is something else.
+fn apply_clients_line(s: &mut Shared, line: &str) -> bool {
+    let Some(json) = line.strip_prefix("Clients: ") else { return false };
+    if let Ok(list) = serde_json::from_str::<Vec<crate::proto::ClientInfo>>(json) {
+        s.status = status_from_clients(&list);
+        s.clients = list;
+        crate::tray::set_tooltip(&format!("MKShare - {}", short_status(s.status).0));
+    }
+    true
+}
+
+/// Handles a `Xfer: {...}` progress line. Returns false if the line is something else.
+fn apply_xfer_line(s: &mut Shared, line: &str) -> bool {
+    let Some(json) = line.strip_prefix("Xfer: ") else { return false };
+    if let Ok(info) = serde_json::from_str::<crate::proto::XferInfo>(json) {
+        // an update of a transfer that is still running replaces it; anything else is a new entry
+        let same = |t: &crate::proto::XferInfo| t.dir == info.dir && t.peer == info.peer && t.name == info.name && t.kind == info.kind && t.state == "progress";
+        match s.transfers.iter().rposition(same) {
+            Some(i) => s.transfers[i] = info,
+            None => s.transfers.push(info),
+        }
+        if s.transfers.len() > 8 {
+            s.transfers.remove(0);
+        }
+    }
+    true
+}
+
 fn spawn_reader<R: Read + Send + 'static>(r: R, shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
     thread::spawn(move || {
         for line in BufReader::new(r).lines().map_while(Result::ok) {
             let mut s = shared.lock().unwrap();
+            if apply_xfer_line(&mut s, &line) {
+                drop(s);
+                ctx.request_repaint();
+                continue; // machine-readable line: not shown in the log
+            }
+            if apply_clients_line(&mut s, &line) {
+                drop(s);
+                ctx.request_repaint();
+                continue; // machine-readable line: not shown in the log
+            }
             if let Some(st) = parse_status(&line) {
                 s.status = st;
                 crate::tray::set_tooltip(&format!("MKShare - {}", short_status(st).0));
@@ -244,6 +299,9 @@ struct App {
     autostart_on: bool,
     startup_error: Option<String>,
     perm_fix: Arc<Mutex<PermFix>>,
+    /// server: the computer dropped files go to (None = all connected computers)
+    drop_target: Option<u64>,
+    drop_note: Option<String>,
     /// when the window opened (drives the intro animation)
     started: Instant,
     splash_skip: bool,
@@ -288,6 +346,8 @@ impl App {
             autostart_on: crate::autostart::is_enabled(),
             startup_error: None,
             perm_fix: Arc::new(Mutex::new(PermFix::Idle)),
+            drop_target: None,
+            drop_note: None,
             // no intro when started hidden at login: pretend it ran long ago
             started: if background { Instant::now().checked_sub(Duration::from_secs(3600)).unwrap_or_else(Instant::now) } else { Instant::now() },
             splash_skip: false,
@@ -304,7 +364,7 @@ impl App {
             error: None,
             child: None,
             stdin: None,
-            shared: Arc::new(Mutex::new(Shared { log: vec![], status: Status::Stopped })),
+            shared: Arc::new(Mutex::new(Shared { log: vec![], status: Status::Stopped, clients: vec![], transfers: vec![] })),
             my_ip: local_ip(),
             running_mode,
         };
@@ -366,6 +426,13 @@ impl App {
         };
         if !self.cfg.share_clipboard {
             cmd.arg("--no-clipboard");
+        } else {
+            if !self.cfg.share_images {
+                cmd.arg("--no-images");
+            }
+            if !self.cfg.share_files {
+                cmd.arg("--no-files");
+            }
         }
         cmd.env("MKSHARE_PASS", &self.cfg.pass)
             .stdin(Stdio::piped())
@@ -403,7 +470,12 @@ impl App {
             let _ = c.wait();
         }
         self.stdin = None;
-        self.shared.lock().unwrap().status = Status::Stopped;
+        {
+            let mut s = self.shared.lock().unwrap();
+            s.status = Status::Stopped;
+            s.clients.clear();
+            s.transfers.clear();
+        }
         crate::tray::set_tooltip("MKShare - Ready");
     }
 
@@ -415,6 +487,8 @@ impl App {
             let mut s = self.shared.lock().unwrap();
             s.log.push(format!("Stopped ({code})"));
             s.status = Status::Stopped;
+            s.clients.clear();
+            s.transfers.clear();
             crate::tray::set_tooltip("MKShare - Ready");
             if !code.success() {
                 self.error = Some(
@@ -486,11 +560,144 @@ impl App {
         });
     }
 
-    fn send_toggle(&mut self) {
+    /// A command for the running server/client process ("toggle", "local", "switch <id>").
+    fn send_cmd(&mut self, cmd: &str) {
         if let Some(i) = self.stdin.as_mut() {
-            let _ = i.write_all(b"toggle\n");
+            let _ = i.write_all(cmd.as_bytes());
+            let _ = i.write_all(b"\n");
             let _ = i.flush();
         }
+    }
+
+    fn send_toggle(&mut self) {
+        self.send_cmd("toggle");
+    }
+
+    /// True while another computer is connected (so that files can be sent).
+    fn can_send_files(&self) -> bool {
+        self.child.is_some() && {
+            let s = self.shared.lock().unwrap();
+            match self.running_mode {
+                Mode::Server => !s.clients.is_empty(),
+                Mode::Client => matches!(s.status, Status::Connected | Status::Remote),
+            }
+        }
+    }
+
+    /// Files dropped onto the window are sent to the other computer(s).
+    fn handle_drop(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        if !self.can_send_files() {
+            self.drop_note = Some("Nothing was sent: start sharing and connect another computer first.".into());
+            return;
+        }
+        self.drop_note = None;
+        let to = if self.running_mode == Mode::Server { self.drop_target } else { None };
+        let paths: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+        let cmd = format!("sendfile {}", serde_json::json!({ "to": to, "paths": paths }));
+        self.send_cmd(&cmd);
+    }
+
+    /// The drop area and the list of recent transfers.
+    fn files_card(&mut self, ui: &mut egui::Ui, hovering: bool) {
+        if self.child.is_none() {
+            return;
+        }
+        let (clients, transfers) = {
+            let s = self.shared.lock().unwrap();
+            (s.clients.clone(), s.transfers.clone())
+        };
+        let ready = self.can_send_files();
+        if !ready && transfers.is_empty() {
+            return;
+        }
+        card(ui, hovering && ready, |ui| {
+            ui.label(RichText::new("Files").size(17.0).strong());
+            if ready {
+                // drop area
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 74.0), egui::Sense::hover());
+                let border = if hovering { ACCENT2 } else { Color32::from_rgb(70, 78, 120) };
+                ui.painter().rect_filled(rect, egui::CornerRadius::same(12), if hovering { Color32::from_rgb(22, 40, 70) } else { FIELD });
+                ui.painter().rect_stroke(rect, egui::CornerRadius::same(12), egui::Stroke::new(1.5_f32, border), egui::StrokeKind::Inside);
+                let target = match (self.running_mode, self.drop_target.and_then(|id| clients.iter().find(|c| c.id == id))) {
+                    (Mode::Server, Some(c)) => c.name.clone(),
+                    (Mode::Server, None) if clients.len() > 1 => "all connected computers".to_string(),
+                    (Mode::Server, None) => clients.first().map(|c| c.name.clone()).unwrap_or_default(),
+                    (Mode::Client, _) => "the server".to_string(),
+                };
+                ui.painter().text(
+                    rect.center() + egui::vec2(0.0, -8.0),
+                    egui::Align2::CENTER_CENTER,
+                    if hovering { "Drop to send".to_string() } else { "Drop files here".to_string() },
+                    egui::FontId::proportional(18.0),
+                    Color32::WHITE,
+                );
+                ui.painter().text(
+                    rect.center() + egui::vec2(0.0, 14.0),
+                    egui::Align2::CENTER_CENTER,
+                    format!("to {target} - saved in its Downloads/MKShare folder"),
+                    egui::FontId::proportional(13.0),
+                    DIM,
+                );
+                // several computers: choose who gets the files
+                if self.running_mode == Mode::Server && clients.len() > 1 {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Send to:").color(DIM));
+                        if ui.add(egui::Button::new("All computers").selected(self.drop_target.is_none())).clicked() {
+                            self.drop_target = None;
+                        }
+                        for c in &clients {
+                            if ui.add(egui::Button::new(&c.name).selected(self.drop_target == Some(c.id))).clicked() {
+                                self.drop_target = Some(c.id);
+                            }
+                        }
+                    });
+                }
+                ui.label(RichText::new("Folders cannot be sent yet. Copying files (Ctrl+C) on one computer and pasting (Ctrl+V) on the other works too.").size(12.0).color(DIM));
+            }
+            if let Some(note) = &self.drop_note {
+                ui.colored_label(AMBER, note);
+            }
+            // recent transfers, newest first
+            let mut clear = false;
+            for t in transfers.iter().rev() {
+                ui.horizontal(|ui| {
+                    let verb = match (t.dir.as_str(), t.kind.as_str()) {
+                        ("in", "image") => "Received image from",
+                        ("out", "image") => "Sent image to",
+                        ("in", _) => "Received from",
+                        _ => "Sent to",
+                    };
+                    let (color, status) = match t.state.as_str() {
+                        "done" => (GREEN, String::from("done")),
+                        "failed" => (RED, format!("failed: {}", t.reason.clone().unwrap_or_default())),
+                        _ => (ACCENT2, format!("{}%", if t.size == 0 { 0 } else { t.done * 100 / t.size })),
+                    };
+                    dot(ui, color, 10.0);
+                    let verb = if t.dir == "in" { verb.to_string() } else { verb.replace("Sent", if t.state == "done" { "Sent" } else { "Sending" }) };
+                    ui.label(RichText::new(format!("{verb} {} - {}", t.peer, t.name)).size(14.0));
+                    ui.label(RichText::new(status).size(13.0).color(color));
+                    if t.state == "done" && t.dir == "in" {
+                        if let Some(path) = &t.path {
+                            if ui.small_button("Show in folder").clicked() {
+                                show_in_folder(path);
+                            }
+                        }
+                    }
+                });
+                if t.state == "progress" && t.size > 0 {
+                    ui.add(egui::ProgressBar::new(t.done as f32 / t.size as f32).desired_height(6.0));
+                }
+            }
+            if !transfers.is_empty() && ui.small_button("Clear list").clicked() {
+                clear = true;
+            }
+            if clear {
+                self.shared.lock().unwrap().transfers.clear();
+            }
+        });
     }
 }
 
@@ -866,7 +1073,16 @@ impl App {
                     ui.label(RichText::new(format!("Stored: {}", self.secret_backend)).size(12.0).color(DIM));
                 }
                 check(ui, &mut self.cfg.share_clipboard, "Share the clipboard (copy on one computer, paste on the other)");
-                ui.label(RichText::new("Text only. Turn off if you copy passwords or other private text.").size(12.0).color(DIM));
+                ui.label(RichText::new("Turn off if you copy passwords or other private text: whatever you copy is sent to the other computer.").size(12.0).color(DIM));
+                if self.cfg.share_clipboard {
+                    ui.horizontal(|ui| {
+                        ui.add_space(30.0);
+                        ui.vertical(|ui| {
+                            check(ui, &mut self.cfg.share_images, "Also share copied images");
+                            check(ui, &mut self.cfg.share_files, "Also share copied files (up to 256 MB at a time)");
+                        });
+                    });
+                }
             });
 
             if client {
@@ -965,13 +1181,25 @@ impl App {
         }
 
         if running {
-            let (text, color) = status.label(self.running_mode);
+            let (label, color) = status.label(self.running_mode);
+            // a server may have several computers connected: say how many, or which one has the input
+            let mut text = label.to_string();
+            if self.running_mode == Mode::Server {
+                let clients = self.shared.lock().unwrap().clients.clone();
+                if let Some(active) = clients.iter().find(|c| c.active) {
+                    text = format!("Keyboard & mouse are on {}", active.name);
+                } else if status == Status::Connected {
+                    text = if clients.len() == 1 { "1 computer connected".into() } else { format!("{} computers connected", clients.len()) };
+                }
+            }
             ui.horizontal(|ui| {
                 dot(ui, color, 12.0);
                 ui.label(RichText::new(text).color(color).strong());
             });
         }
         self.run_controls(ui, status, running);
+        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        self.files_card(ui, hovering);
 
         // ---- log
         card(ui, false, |ui| {
@@ -1008,22 +1236,47 @@ impl App {
             }
         }
         if running && self.running_mode == Mode::Server {
-            match status {
-                Status::Connected => {
-                    if secondary_button(ui, "Send keyboard and mouse to the other computer") {
-                        self.send_toggle();
+            let clients = self.shared.lock().unwrap().clients.clone();
+            let mods = self.hk.modifiers_pretty();
+            if clients.is_empty() {
+                ui.label(RichText::new("Start the app on the other computers (Client) to connect. You can connect several.").color(DIM));
+            } else {
+                let mut command: Option<String> = None;
+                card(ui, false, |ui| {
+                    ui.label(RichText::new(if clients.len() == 1 { "Connected computer" } else { "Connected computers" }).size(17.0).strong());
+                    for c in &clients {
+                        ui.horizontal(|ui| {
+                            dot(ui, if c.active { ACCENT2 } else { GREEN }, 12.0);
+                            ui.label(RichText::new(&c.name).size(17.0).strong());
+                            if let (Some(n), false) = (c.slot, mods.is_empty()) {
+                                ui.label(RichText::new(format!("{mods}+{n}")).size(13.0).color(DIM));
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if c.active {
+                                    ui.label(RichText::new("Using the keyboard and mouse").color(ACCENT2));
+                                } else if ui.button("Use this computer").clicked() {
+                                    command = Some(format!("switch {}", c.id));
+                                }
+                            });
+                        });
                     }
+                });
+                if clients.iter().any(|c| c.active) && secondary_button(ui, "Back to this computer") {
+                    command = Some("local".to_string());
                 }
-                Status::Remote => {
-                    ui.label(RichText::new(format!("Press {hk_text} to bring them back here.")).strong());
-                }
-                _ => {
-                    ui.label(RichText::new("Start the app on the other computer (Client) to connect.").color(DIM));
+                if let Some(cmd) = command {
+                    self.send_cmd(&cmd);
                 }
             }
-            ui.label(RichText::new(format!("Shortcut: {hk_text} switches back and forth.")).color(DIM));
+            ui.label(RichText::new(format!("Shortcut: {hk_text} switches between this computer and the computer used last.")).color(DIM));
+            if !mods.is_empty() && !clients.is_empty() {
+                ui.label(RichText::new(format!("{mods}+1 to {mods}+9 jump straight to the computer with that number.")).color(DIM));
+            }
             if self.cfg.edge_enabled {
-                ui.label(RichText::new(format!("Screen edge: move the mouse off the {} edge.", self.cfg.edge_side)).color(DIM));
+                ui.label(
+                    RichText::new(format!("Screen edge: move the mouse off the {} edge (it goes to the computer used last).", self.cfg.edge_side))
+                        .color(DIM),
+                );
             }
         }
     }
@@ -1075,6 +1328,15 @@ impl App {
                     Ok(()) => {
                         self.cfg.hotkey = self.hk.to_string();
                         ui.label(RichText::new(format!("Press {} on the server's keyboard to switch.", self.hk.pretty())).color(DIM));
+                        let mods = self.hk.modifiers_pretty();
+                        if !mods.is_empty() {
+                            ui.label(
+                                RichText::new(format!(
+                                    "With several computers connected, {mods}+1 to {mods}+9 jump straight to a computer. The server remembers each computer's number, so it stays the same after reconnecting."
+                                ))
+                                .color(DIM),
+                            );
+                        }
                     }
                     Err(e) => {
                         ui.colored_label(RED, e);
@@ -1190,6 +1452,9 @@ impl App {
             self.hide_first_frame = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
+        // Files dropped onto the window are sent to the other computer(s).
+        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+        self.handle_drop(dropped);
         // Closing the window hides it in the tray (Windows) so sharing keeps running.
         if ctx.input(|i| i.viewport().close_requested()) && self.tray_ok && self.cfg.tray_close && !crate::tray::is_quitting() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -1388,10 +1653,7 @@ mod ui_tests {
 
     impl Harness {
         fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!("mkshare-ui-test-{}", std::process::id()));
-            std::fs::create_dir_all(&dir).unwrap();
-            std::env::set_var("XDG_CONFIG_HOME", &dir);
-            std::env::set_var("APPDATA", &dir);
+            crate::secret::use_test_config_dir(); // never the real settings, and no environment change
             let ctx = egui::Context::default();
             theme(&ctx);
             let mut app = App::new(&ctx, false, false);
@@ -1464,5 +1726,202 @@ mod ui_tests {
         // the chosen entry stays chosen after more frames, and the address field keeps the value
         h.frame(vec![]);
         assert_eq!(h.app.cfg.host, "192.168.1.78");
+    }
+}
+
+#[cfg(test)]
+mod clients_tests {
+    use super::*;
+    use crate::proto::ClientInfo;
+
+    fn shared() -> Shared {
+        Shared { log: vec![], status: Status::Stopped, clients: vec![], transfers: vec![] }
+    }
+
+    #[test]
+    fn the_clients_line_drives_the_server_status_and_the_list() {
+        let mut s = shared();
+        assert!(apply_clients_line(&mut s, "Clients: []"));
+        assert!(s.status == Status::Waiting && s.clients.is_empty());
+
+        let line = r#"Clients: [{"id":1,"name":"A","slot":1,"active":false},{"id":2,"name":"B","slot":2,"active":false}]"#;
+        assert!(apply_clients_line(&mut s, line));
+        assert!(s.status == Status::Connected);
+        assert_eq!(s.clients.len(), 2);
+        assert_eq!(s.clients[1], ClientInfo { id: 2, name: "B".into(), slot: Some(2), active: false });
+
+        let line = r#"Clients: [{"id":1,"name":"A","slot":1,"active":false},{"id":2,"name":"B","slot":null,"active":true}]"#;
+        assert!(apply_clients_line(&mut s, line));
+        assert!(s.status == Status::Remote);
+        assert_eq!(s.clients[1].slot, None);
+    }
+
+    #[test]
+    fn other_lines_are_not_client_lines() {
+        let mut s = shared();
+        assert!(!apply_clients_line(&mut s, "Client connected: A (10.0.0.1:5000)"));
+        assert!(!apply_clients_line(&mut s, "Input -> LOCAL"));
+        assert!(s.status == Status::Stopped);
+        // garbage after the prefix is swallowed without changing anything
+        assert!(apply_clients_line(&mut s, "Clients: not json"));
+        assert!(s.status == Status::Stopped && s.clients.is_empty());
+    }
+
+    #[test]
+    fn what_the_server_prints_is_what_the_app_reads() {
+        let info = vec![ClientInfo { id: 7, name: "Büro PC".into(), slot: Some(3), active: true }];
+        let printed = format!("Clients: {}", serde_json::to_string(&info).unwrap());
+        let mut s = shared();
+        assert!(apply_clients_line(&mut s, &printed));
+        assert_eq!(s.clients, info);
+    }
+}
+
+/// Opens the folder that contains a received file (with the file selected where the system allows).
+fn show_in_folder(path: &str) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("explorer").arg(format!("/select,{path}")).creation_flags(0x0800_0000).spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let dir = std::path::Path::new(path).parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+        let _ = Command::new("xdg-open").arg(dir).spawn();
+    }
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+    use crate::proto::{ClientInfo, XferInfo};
+
+    fn info(name: &str, state: &str, done: u64) -> String {
+        let i = XferInfo {
+            dir: "out".into(),
+            peer: "PC".into(),
+            name: name.into(),
+            size: 100,
+            done,
+            state: state.into(),
+            path: None,
+            reason: None,
+            kind: "drop".into(),
+        };
+        format!("Xfer: {}", serde_json::to_string(&i).unwrap())
+    }
+
+    fn shared() -> Shared {
+        Shared { log: vec![], status: Status::Stopped, clients: vec![], transfers: vec![] }
+    }
+
+    #[test]
+    fn progress_lines_update_one_entry_and_finished_ones_stay() {
+        let mut s = shared();
+        assert!(apply_xfer_line(&mut s, &info("a.zip", "progress", 10)));
+        assert!(apply_xfer_line(&mut s, &info("a.zip", "progress", 60)));
+        assert_eq!(s.transfers.len(), 1);
+        assert_eq!(s.transfers[0].done, 60);
+        assert!(apply_xfer_line(&mut s, &info("a.zip", "done", 100)));
+        assert_eq!(s.transfers.len(), 1);
+        assert_eq!(s.transfers[0].state, "done");
+        // the same name again is a new transfer
+        assert!(apply_xfer_line(&mut s, &info("a.zip", "progress", 5)));
+        assert_eq!(s.transfers.len(), 2);
+        // only the 8 most recent are kept
+        for i in 0..12 {
+            apply_xfer_line(&mut s, &info(&format!("f{i}"), "done", 100));
+        }
+        assert_eq!(s.transfers.len(), 8);
+        assert_eq!(s.transfers.last().unwrap().name, "f11");
+        // other lines are not transfer lines; broken JSON is swallowed
+        assert!(!apply_xfer_line(&mut s, "Client connected: A"));
+        assert!(apply_xfer_line(&mut s, "Xfer: nonsense"));
+        assert_eq!(s.transfers.len(), 8);
+    }
+
+    #[cfg(target_os = "linux")]
+    mod drops {
+        use super::*;
+        use std::process::{Command, Stdio};
+
+        /// An app whose "server process" is `cat`, so we can read the commands the window sends it.
+        fn app_with_fake_process(mode: Mode, out: &std::path::Path) -> (egui::Context, App) {
+            crate::secret::use_test_config_dir();
+            let ctx = egui::Context::default();
+            theme(&ctx);
+            let mut app = App::new(&ctx, false, false);
+            app.splash_skip = true;
+            app.cfg = Config::default();
+            app.scanned_once = true;
+            let mut child = Command::new("sh").arg("-c").arg(format!("cat > '{}'", out.display())).stdin(Stdio::piped()).spawn().unwrap();
+            app.stdin = child.stdin.take();
+            app.child = Some(child);
+            app.running_mode = mode;
+            app.cfg.mode = mode;
+            (ctx, app)
+        }
+
+        fn drop_files(ctx: &egui::Context, app: &mut App, paths: &[&str]) {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(920.0, 800.0))),
+                dropped_files: paths.iter().map(|p| egui::DroppedFile { path: Some(PathBuf::from(p)), ..Default::default() }).collect(),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| app.ui(ctx));
+        }
+
+        fn finish(mut app: App, out: &std::path::Path) -> String {
+            drop(app.stdin.take()); // lets `cat` finish
+            let _ = app.child.take().unwrap().wait();
+            let s = std::fs::read_to_string(out).unwrap_or_default();
+            let _ = std::fs::remove_file(out);
+            s
+        }
+
+        fn out_path(tag: &str) -> PathBuf {
+            std::env::temp_dir().join(format!("mkshare-drop-cmd-{tag}-{}", std::process::id()))
+        }
+
+        #[test]
+        fn files_dropped_on_the_server_go_to_the_chosen_computer() {
+            let out = out_path("server");
+            let (ctx, mut app) = app_with_fake_process(Mode::Server, &out);
+            {
+                let mut s = app.shared.lock().unwrap();
+                s.status = Status::Connected;
+                s.clients = vec![
+                    ClientInfo { id: 4, name: "Laptop".into(), slot: Some(1), active: false },
+                    ClientInfo { id: 5, name: "Desktop".into(), slot: Some(2), active: false },
+                ];
+            }
+            drop_files(&ctx, &mut app, &["/tmp/a b.txt", "/tmp/c.png"]); // everyone
+            app.drop_target = Some(5);
+            drop_files(&ctx, &mut app, &["/tmp/d.zip"]); // one computer
+            let lines: Vec<String> = finish(app, &out).lines().map(String::from).collect();
+            assert_eq!(lines.len(), 2, "{lines:?}");
+            assert_eq!(lines[0], r#"sendfile {"paths":["/tmp/a b.txt","/tmp/c.png"],"to":null}"#);
+            assert_eq!(lines[1], r#"sendfile {"paths":["/tmp/d.zip"],"to":5}"#);
+        }
+
+        #[test]
+        fn files_dropped_on_a_client_go_to_the_server() {
+            let out = out_path("client");
+            let (ctx, mut app) = app_with_fake_process(Mode::Client, &out);
+            app.shared.lock().unwrap().status = Status::Connected;
+            app.drop_target = Some(99); // ignored on a client
+            drop_files(&ctx, &mut app, &["/home/u/Doc.pdf"]);
+            assert_eq!(finish(app, &out).trim(), r#"sendfile {"paths":["/home/u/Doc.pdf"],"to":null}"#);
+        }
+
+        #[test]
+        fn nothing_is_sent_when_no_computer_is_connected() {
+            let out = out_path("none");
+            let (ctx, mut app) = app_with_fake_process(Mode::Server, &out);
+            app.shared.lock().unwrap().status = Status::Waiting;
+            drop_files(&ctx, &mut app, &["/tmp/x.txt"]);
+            assert!(app.drop_note.is_some(), "the user is told why nothing happened");
+            assert_eq!(finish(app, &out), "");
+        }
     }
 }

@@ -33,6 +33,61 @@ pub enum Msg {
     Leave { x: f32, y: f32 },
     /// either direction: text the user copied on one computer (clipboard sharing)
     Clipboard(String),
+    /// client -> server, first message after the handshake: this computer's name
+    Name(String),
+
+    // ---- file and image transfer (either direction; see xfer.rs)
+    /// A file or image is about to be sent. `batch`/`index`/`count` group several files of one clipboard copy.
+    XferBegin { id: u32, kind: XferKind, name: String, size: u64, batch: u32, index: u16, count: u16 },
+    /// A piece of it (at most 32 KiB).
+    XferData { id: u32, bytes: Vec<u8> },
+    /// All pieces were sent.
+    XferEnd { id: u32 },
+    /// receiver -> sender: this many bytes are stored (keeps the sender from running ahead)
+    XferAck { id: u32, bytes: u64 },
+    /// either side: stop this transfer
+    XferCancel { id: u32, reason: String },
+}
+
+/// What a transfer is for.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XferKind {
+    /// a copied image (PNG), put on the other computer's clipboard
+    Image,
+    /// one of the files of a clipboard copy; once all have arrived they are put on the clipboard
+    File,
+    /// a file dropped onto the MKShare window: saved in the Downloads/MKShare folder
+    Drop,
+}
+
+/// Progress of a transfer, as shown in the app (the server/client prints these as JSON lines).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct XferInfo {
+    /// "in" (received) or "out" (sent)
+    pub dir: String,
+    /// the other computer
+    pub peer: String,
+    pub name: String,
+    pub size: u64,
+    pub done: u64,
+    /// "progress", "done" or "failed"
+    pub state: String,
+    /// where a received file was saved
+    pub path: Option<String>,
+    pub reason: Option<String>,
+    /// "image", "file" or "drop"
+    pub kind: String,
+}
+
+/// One connected computer, as shown in the server's app (the server prints these as JSON).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ClientInfo {
+    pub id: u64,
+    pub name: String,
+    /// 1..=9: the digit key that jumps straight to this computer (with the switch shortcut's modifiers)
+    pub slot: Option<u8>,
+    /// true while this computer has the keyboard and mouse
+    pub active: bool,
 }
 
 /// An input event captured on the server machine.
@@ -174,6 +229,24 @@ impl Hotkey {
         }
         hk.validate()?;
         Ok(hk)
+    }
+
+    /// The modifiers only, e.g. "Ctrl+Alt" (the digit keys 1-9 use them to jump to a computer).
+    pub fn modifiers_pretty(&self) -> String {
+        let mut parts = Vec::new();
+        if self.ctrl {
+            parts.push("Ctrl");
+        }
+        if self.alt {
+            parts.push("Alt");
+        }
+        if self.shift {
+            parts.push("Shift");
+        }
+        if self.meta {
+            parts.push("Win");
+        }
+        parts.join("+")
     }
 
     /// Human readable, e.g. "Ctrl+Alt+K".

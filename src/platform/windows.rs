@@ -332,7 +332,7 @@ impl Injector {
                 }
                 Msg::ReleaseAll => self.release_all(),
                 Msg::Hello | Msg::Ping | Msg::Toggle | Msg::Active(_) => {}
-                Msg::EdgeConfig { .. } | Msg::Enter { .. } | Msg::Leave { .. } | Msg::Clipboard(_) => {}
+                Msg::EdgeConfig { .. } | Msg::Enter { .. } | Msg::Leave { .. } | Msg::Clipboard(_) | Msg::Name(_) | Msg::XferBegin { .. } | Msg::XferData { .. } | Msg::XferEnd { .. } | Msg::XferAck { .. } | Msg::XferCancel { .. } => {}
             }
         }
     }

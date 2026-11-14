@@ -6,8 +6,26 @@
 
 use std::path::PathBuf;
 
+/// Tests use a private folder (set once, no environment variable is touched: tests run in parallel).
+#[cfg(test)]
+static TEST_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Tests: use a private settings folder (never the user's) and no real keyring. Safe to call from any test.
+#[cfg(test)]
+pub fn use_test_config_dir() {
+    TEST_DIR.get_or_init(|| {
+        let d = std::env::temp_dir().join(format!("mkshare-test-config-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        d
+    });
+}
+
 /// Directory for MKShare's settings (created on demand).
 pub fn config_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(d) = TEST_DIR.get() {
+        return Some(d.join("mkshare"));
+    }
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else {
@@ -102,7 +120,11 @@ mod imp {
     const ATTRS: [&str; 4] = ["service", "mkshare", "account", "passphrase"];
 
     fn secret_tool() -> Command {
-        let mut c = Command::new("secret-tool");
+        #[cfg(test)]
+        let program = if super::TEST_DIR.get().is_some() { "mkshare-test-no-keyring" } else { "secret-tool" };
+        #[cfg(not(test))]
+        let program = "secret-tool";
+        let mut c = Command::new(program);
         c.stderr(Stdio::null());
         c
     }
@@ -182,16 +204,8 @@ pub use imp::{backend, clear, load, store};
 mod tests {
     #[test]
     fn store_load_clear_roundtrip() {
-        // Use a private settings folder so the user's real settings are never touched.
-        let dir = std::env::temp_dir().join(format!("mkshare-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        if cfg!(windows) {
-            std::env::set_var("APPDATA", &dir);
-        } else {
-            std::env::set_var("XDG_CONFIG_HOME", &dir);
-            // keep the test off the real keyring: pretend secret-tool is not installed
-            std::env::set_var("PATH", "/nonexistent");
-        }
+        // a private settings folder and no real keyring: the user's own settings are never touched
+        super::use_test_config_dir();
         let pass = "correct horse battery staple \u{00e9}";
         super::store(pass).unwrap();
         assert_eq!(super::load().as_deref(), Some(pass));
@@ -210,6 +224,5 @@ mod tests {
 
         super::clear();
         assert_eq!(super::load(), None);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
